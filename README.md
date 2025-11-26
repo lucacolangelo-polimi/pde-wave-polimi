@@ -44,20 +44,16 @@ $$
 $$
 
 ### Hyperbolic term
-$$
-\frac{\partial^2 u}{\partial t^2}
-$$ 
-Represents the acceleration of the field over time.   This is the key term that makes the equation hyperbolic and describes wave propagation.
+`$ \frac{\partial^2 u}{\partial t^2} $`  
+Represents the acceleration of the field over time. This is the key term that makes the equation hyperbolic and describes wave propagation.
 
 ### Spatial term
-$$
-\Delta u
-$$
-Represents restoring forces or internal stresses within the medium.   It is the source of spatial propagation of the motion.
+`$ \Delta u $`  
+Represents restoring forces or internal stresses within the medium. It is the source of spatial propagation of the motion.
 
 ### Forcing term
-$f$  
-Represents an external energy source or applied force acting on the system within the domain.   If $f = 0$, the equation is homogeneous and describes freely propagating waves.
+`$ f $`  
+Represents an external energy source or applied force acting on the system within the domain. If `$ f = 0 $`, the equation is homogeneous and describes freely propagating waves.
 
 **Note:**  
 The standard form of the wave equation includes a propagation constant $c^2$:
@@ -89,27 +85,16 @@ Because the wave equation is second order in time, it requires **two initial con
 
 ### Weak Form
 
-For the homogeneous equation (with $f = 0$ and $g = 0$), we multiply by a test function  
-$v \in H_0^1(\Omega)$ and integrate over $\Omega$:
+For the homogeneous equation (with `$ f = 0 $` and `$ g = 0 $`), multiplying by a test function  
+`$ v \in H_0^1(\Omega) $` and integrating over `$\Omega$`, we get:
 
-$$
-\int_{\Omega} \frac{\partial^2 u}{\partial t^2}\, v \, dx 
-\;-\;
-\int_{\Omega} \Delta u \, v \, dx 
-= 0.
-$$
+`$ \int_{\Omega} \frac{\partial^2 u}{\partial t^2} \, v \, dx - \int_{\Omega} \Delta u \, v \, dx = 0 $`
 
-Applying integration by parts (Green's identity) to the Laplacian term:
+Applying integration by parts (Green's theorem) to the Laplacian term:
 
-$$
-\int_{\Omega} \frac{\partial^2 u}{\partial t^2}\, v \, dx 
-\;+\;
-\int_{\Omega} \nabla u \cdot \nabla v \, dx 
-= 0.
-$$
+`$ \int_{\Omega} \frac{\partial^2 u}{\partial t^2} \, v \, dx + \int_{\Omega} \nabla u \cdot \nabla v \, dx = 0 $`
 
 The FEM implementation will be based on the discretization of this weak form.
-
 
 ### Implications for the Numerical Solution
 
