@@ -2,9 +2,9 @@
 # Configuration Variables
 # -----------------------------------------------------------------------------
 CXX = g++                                       # C++ Compiler (assuming g++)
-CXXFLAGS = -std=c++17 -Wall -Wextra -g          # Compilation flags: C++17, active Warnings, -g for debugging
+CXXFLAGS = -std=c++17 -Wall -Wextra -g -I/usr/include/eigen3        # Compilation flags: C++17, active Warnings, -g for debugging
 TARGET = wave_solver                            # Name of the final executable file
-SOURCES = main.cpp Mesh.cpp                     # List of all source files (.cpp)
+SOURCES = main.cpp Mesh.cpp ShapeFunctions.cpp                   # List of all source files (.cpp)
 
 # -----------------------------------------------------------------------------
 # Rules (Targets)
