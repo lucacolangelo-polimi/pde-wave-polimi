@@ -1,26 +1,28 @@
-# -----------------------------------------------------------------------------
-# Configuration Variables
-# -----------------------------------------------------------------------------
-CXX = g++                                       # C++ Compiler (assuming g++)
-CXXFLAGS = -std=c++17 -Wall -Wextra -g -I/usr/include/eigen3        # Compilation flags: C++17, active Warnings, -g for debugging
-TARGET = wave_solver                            # Name of the final executable file
-SOURCES = main.cpp Mesh.cpp ShapeFunctions.cpp                   # List of all source files (.cpp)
+cmake_minimum_required(VERSION 3.13)
 
-# -----------------------------------------------------------------------------
-# Rules (Targets)
-# -----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# TODO: You can change the project name here if desired
+# ----------------------------------------------------------------------------
+project(wave_solver_dealii)
 
-# Main Rule: compiles the project
-all: $(TARGET)
+# ----------------------------------------------------------------------------
+# BLOCK: deal.II Configuration
+# Finds the library installed on the system. Do not edit.
+# ----------------------------------------------------------------------------
+find_package(deal.II 9.0.0 REQUIRED)
+deal_ii_initialize_cached_variables()
 
-# Rule for building the executable (linking)
-$(TARGET): $(SOURCES)
-	$(CXX) $(CXXFLAGS) $(SOURCES) -o $(TARGET)
+# ----------------------------------------------------------------------------
+# BLOCK: Sources and Executable Definition
+# Add any other .cc files here if the project expands
+# ----------------------------------------------------------------------------
+add_executable(wave_solver
+    main.cc
+    source/WaveEquation.cc
+)
 
-# Rule for execution
-run: $(TARGET)
-	./$(TARGET)
+# Link deal.II libraries to the executable
+target_link_libraries(wave_solver ${DEAL_II_LIBRARIES})
 
-# Rule for cleaning up (removes the executable)
-clean:
-	rm -f $(TARGET)
+# Copy .msh files to the build directory (optional, useful if using GMSH)
+# file(COPY ${CMAKE_SOURCE_DIR}/mesh.msh DESTINATION ${CMAKE_BINARY_DIR})
