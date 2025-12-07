@@ -1,4 +1,4 @@
-# Solving the wave equation
+# Solving the Wave Equation
 
 General formula:
 
@@ -7,7 +7,7 @@ $$
 $$
 
 $$
-u = g \quad \text{su } \partial\Omega \times [0,T]
+u = g \quad \text{on } \partial\Omega \times [0,T]
 $$
 
 $$
@@ -26,10 +26,7 @@ Where:
 - The Laplace operator is defined as:
 
 $$
-\Delta u =
-\frac{\partial^2 u}{\partial x_1^2}
-+
-\frac{\partial^2 u}{\partial x_2^2}.
+\Delta u = \frac{\partial^2 u}{\partial x_1^2} + \frac{\partial^2 u}{\partial x_2^2}
 $$
 
 # 1. Term-by-term analysis
@@ -37,32 +34,31 @@ $$
 ### a. Partial Differential Equation (PDE)
 
 $$
-\frac{\partial^2 u}{\partial t^2} - \Delta u = f 
-\quad \text{in } \Omega \times (0,T]
+\frac{\partial^2 u}{\partial t^2} - \Delta u = f \quad \text{in } \Omega \times (0,T]
 $$
 
 ### Hyperbolic term
 
-`∂²u/∂t²`  
+$\frac{\partial^2 u}{\partial t^2}$  
 Represents the acceleration of the field over time. This is the key term that makes the equation hyperbolic and describes wave propagation.
 
 ### Spatial term
 
-`Δu`  
+$\Delta u$  
 Represents restoring forces or internal stresses within the medium. It is the source of spatial propagation of the motion.
 
 ### Forcing term
 
-`f`  
-Represents an external energy source or applied force acting on the system within the domain. If `f = 0`, the equation is homogeneous and describes freely propagating waves.
+$f$  
+Represents an external energy source or applied force acting on the system within the domain. If $f = 0$, the equation is homogeneous and describes freely propagating waves.
 
-**Note:**  
-The standard form of the wave equation includes a propagation constant `c²`:
+**Note:** The standard form of the wave equation includes a propagation constant $c^2$:
 
-`∂²u/∂t² - c² Δu = f`
+$$
+\frac{\partial^2 u}{\partial t^2} - c^2 \Delta u = f
+$$
 
-In our problem, it is implicitly assumed that `c = 1` (unit propagation speed).
-
+In our problem, it is implicitly assumed that $c = 1$ (unit propagation speed).
 
 ---
 
@@ -73,7 +69,7 @@ u = g \quad \text{on } \partial\Omega \times [0,T]
 $$
 
 This is a **Dirichlet boundary condition**.  
-It specifies the value of the wave field $u$ along the boundary $\partial\Omega$ of the domain for all times.   $g$ is a known function.  
+It specifies the value of the wave field $u$ along the boundary $\partial\Omega$ of the domain for all times. $g$ is a known function.  
 If $g = 0$, the boundary is “fixed,” or—depending on interpretation—an “ideal absorbing boundary.”
 
 ---
@@ -87,165 +83,98 @@ Because the wave equation is second order in time, it requires **two initial con
 
 # 2. Weak Form
 
-For the homogeneous equation (with `f = 0` and `g = 0`), multiplying by a test function
-`v \in H_0^1(\Omega)` and integrating over `Ω`, we get:
+For the homogeneous equation (with $f = 0$ and $g = 0$), multiplying by a test function $v \in H_0^1(\Omega)$ and integrating over $\Omega$, we get:
 
-`∫_Ω (∂²u/∂t²) v dx - ∫_Ω Δu v dx = 0`
+$$
+\int_\Omega \frac{\partial^2 u}{\partial t^2} v \, dx - \int_\Omega \Delta u \, v \, dx = 0
+$$
 
 Applying integration by parts (Green's theorem) to the Laplacian term:
 
-`∫_Ω (∂²u/∂t²) v dx + ∫_Ω ∇u ⋅ ∇v dx = 0`
+$$
+\int_\Omega \frac{\partial^2 u}{\partial t^2} v \, dx + \int_\Omega \nabla u \cdot \nabla v \, dx = 0
+$$
 
-The FEM implementation will be based on the discretization of this weak form.
+The FEM implementation is based on the discretization of this weak form.
 
 ### Implications for the Numerical Solution
 
-The hyperbolic nature of the equation is crucial for our implementation:
+The hyperbolic nature of the equation is crucial for our implementation: numerical stability relies on the correct handling of the time-derivative term in conjunction with the spatial discretization.
 
 ---
 
 # 3. Time Discretization
 
-Since the problem is time-dependent (evolution in time), you will need to use a time integration method such as:
+Since the problem is time-dependent, we use a time integration method. We chose the **Centered Finite Difference Method** (also known as the **Leapfrog scheme**).
 
-- the **Centered Finite Difference Method** (or **Leapfrog scheme**), which is classically used for the wave equation,  
-- or more advanced methods such as **Runge–Kutta** schemes.
-
-The choice of the time-stepping method will strongly affect **numerical stability**.
+The choice of the time-stepping method strongly affects **numerical stability** (CFL condition).
 
 ---
 
 # 4. Space Discretization
 
-This is where the Finite Element Method (FEM), which is required, comes into play.  
-To use FEM, it is needed to reformulate the problem in its weak (or variational) form within an appropriate functional space (typically $H^1(\Omega)$).
+This is where the Finite Element Method (FEM) comes into play. To use FEM, the problem is reformulated in its weak form within an appropriate functional space (typically $H^1(\Omega)$) and discretized using the **deal.II library**.
 
 ---
 
-# 5. General structure of the project
-## 2D Wave Equation Solver
+# 5. General Structure of the Project
 
-The goal of this project is to solve the 2D wave equation using the **Finite Element Method (FEM)** in space and an **explicit time-stepping scheme**. The solver follows these main steps:
+The goal of this project is to solve the 2D wave equation using the **deal.II library** for the Finite Element Method (FEM) in space and an **explicit time-stepping scheme**. The solver follows these main steps:
 
-## a. Mesh Generation and FEM Space
+## a. Mesh Generation and DoF Management
+- The domain $\Omega$ is triangulated using deal.II's `Triangulation` class.
+- We generate a structured grid (e.g., `GridGenerator::hyper_cube`) or import it from external formats (e.g., Gmsh).
+- Degrees of Freedom (DoFs) are distributed using a **P1 finite element space** (`FE_SimplexP<dim>(1)`), representing linear polynomials on each triangle.
 
-- The domain Ω is divided into triangles (2D mesh).  
-- We define a **P1 function space**, i.e., linear polynomials on each triangle.  
-  This allows us to represent the solution \(u(x, y, t)\) in a simple and linear way between mesh nodes.
+## b. System Assembly
+Using deal.II's `FEValues` and quadrature formulas (`QGauss`), we compute the system matrices:
+- **Mass Matrix ($M$)**: Represents the $L^2$ inner product of basis functions $\int \phi_i \phi_j$.
+- **Stiffness Matrix ($K$)**: Represents the inner product of gradients $\int \nabla \phi_i \cdot \nabla \phi_j$.
 
-## b. Assembly of Matrices
+## c. Boundary Conditions
+- **Dirichlet boundaries** (where $u=g$) are handled by identifying boundary DoFs and applying constraints to the solution vectors or the system matrix.
 
-- **Mass matrix M**: represents the accumulation of “mass” at each node.  
-- **Stiffness matrix K**: represents the “resistance” of the system to changes in the solution (spatial derivatives).  
+## d. Time-Stepping Scheme (Leapfrog)
+We implement the explicit central difference scheme:
 
-For an explicit scheme, it is convenient to use **mass-lumping**: replace M with a diagonal approximation.  
-This makes each node independent in the time update, avoiding the need to solve large linear systems.
-
-## c. Application of Boundary Conditions
-
-- The solution values on the domain boundaries (∂Ω) are fixed to \(g\).  
-- These conditions are applied directly to the matrices or to the initial solution, depending on the implementation.
-
-## d. Time-Stepping Scheme
-
-We use a **centered explicit scheme** (central difference / Leap-Frog):
-
-\[
+$$
 U^{n+1} = 2 U^n - U^{n-1} + \Delta t^2 M^{-1} (F^n - K U^n)
-\]
+$$
 
-**Advantages:**
-- Simple to implement.
-- Stable if Δt is small enough (CFL condition).
-- Very efficient if M is diagonal.
+In the deal.II implementation, solving $M^{-1}$ typically involves solving a linear system ($M a = RHS$) at each step using a Solver (like Conjugate Gradient) or using Mass Lumping techniques.
 
-**Disadvantages:**
-- Introduces slight numerical dispersion (waves may travel slightly faster or slower than the exact solution).
-- Minimal numerical dissipation.
-
-## e. Time Loop
-
-- Starting from the initial conditions \(u_0\) and \(\partial_t u|_{t=0} = u_1\), the solution is updated step by step using the explicit scheme.  
-- At each time step, the solution can be saved or visualized to analyze wave propagation.
-
-## f. Output and Analysis
-
-- Visualize the evolution of \(u(x, y, t)\) over time.  
-- Discuss the effects of time step Δt, mesh resolution, mass-lumping, and numerical dispersion.
-
-# 6. Code Architecture
-## Project Architecture
-
-The solver is organized in a modular way, with each module handling a specific part of the computation. The main modules are:
-
-### A. Mesh Module
-This module defines the 2D mesh and its properties:
-- **Nodes, elements, and boundary nodes**  
-- **Element areas and Jacobians**  
-
-For small meshes, the mesh can be defined manually, or optionally read from a `.msh` file.
-
-**Files:**
-- `Mesh.hpp`: defines `Node` and `Element` structures and the `Mesh` class, which contains vectors of nodes, elements, and boundary nodes.
-- `Mesh.cpp`: implements the constructor, computes element areas and Jacobians, and optionally parses a mesh file.
+## e. Output and Analysis
+- The solution is exported at regular time intervals using `DataOut` in **VTK format**.
+- Results can be visualized in **Paraview** to observe wave propagation, reflection, and interference.
 
 ---
 
-### B. P1 Shape Functions Module
-This module handles the linear (P1) shape functions used in the FEM discretization:
-- Evaluates `phi[i]` and `grad_phi[i]` for each element
-- Computes **elementary integrals** for mass and stiffness matrices
+# 6. Code Architecture with deal.II
 
-**Files:**
-- `ShapeFunctions.hpp`: declarations for P1 shape functions, gradients, and element-wise integration.
-- `ShapeFunctions.cpp`: implements `computeLocalMassMatrix()` and `computeLocalStiffnessMatrix()` for each triangular element.
+The project leverages the **deal.II** library structure. Instead of separating Mesh, Assembly, and Solver into different classes, the logic is encapsulated within a single template class that manages the entire simulation lifecycle.
 
----
+### The `WaveEquation<dim>` Class
+This is the core class of the project. It relies on C++ templates to be dimension-independent (working seamlessly in 2D or 3D).
 
-### C. Assembly Module
-Responsible for building the global system:
-- Iterates over all elements  
-- Computes local contributions and assembles them into **sparse global matrices**  
-- Applies Dirichlet boundary conditions  
-- Performs **mass lumping** for explicit time-stepping  
+#### 1. Setup and Grid Management (`make_grid`, `setup_system`)
+- **`make_grid()`**: Generates the geometry using `GridGenerator` or reads a mesh file using `GridIn`. It handles global refinement.
+- **`setup_system()`**: Initializes the `DoFHandler`, computes the sparsity pattern, and resizes the sparse matrices ($M$, $K$) and solution vectors ($U_{old}, U_{curr}, U_{new}$) to the correct size.
 
-**Files:**
-- `Assembler.hpp`: declares functions or a class to assemble global sparse matrices, apply boundary conditions, and perform mass-lumping.
-- `Assembler.cpp`: implements element loops and assembly using `Eigen::SparseMatrix`.
+#### 2. Assembly (`assemble_system`)
+- This method populates the **Mass Matrix** and **Stiffness Matrix**.
+- It iterates over all active cells, initializes `FEValues`, computes local contributions via quadrature, and distributes them into the global sparse matrices.
+- This is done **once** before the time loop (since the mesh is static).
 
----
+#### 3. Time Evolution (`run`, `solve_time_step`)
+- **`run()`**: The main driver. It orchestrates the setup, applies initial conditions, and executes the time loop.
+- **`solve_time_step()`**: Implements the algebraic operations for the Leapfrog scheme. It computes the Right-Hand Side (RHS), solves the linear system involving the Mass Matrix (to find acceleration), and updates the displacement vector $U^{n+1}$.
 
-### D. Time-Stepping Module
-Handles the temporal evolution of the solution:
-- Initializes \(U^0\) and \(U^1\) using explicit Taylor expansion  
-- Performs the explicit time-stepping loop using the **central difference scheme**  
-- Updates the solution at each time step
+#### 4. Output (`output_results`)
+- Uses the `DataOut` class to attach the DoF handler and the solution vector.
+- Writes `.vtk` files (e.g., `solution-001.vtk`) containing the wave field state at specific time steps for post-processing.
 
-**Files:**
-- `TimeIntegrator.hpp`: contains a class (e.g., `WaveSolver`) with methods like `initialize()` and `stepForward()`.
-- `TimeIntegrator.cpp`: implements initialization and explicit update rules.
+### Main Entry Point (`main.cc`)
+A minimal file that initializes the `WaveEquation<2>` object and calls the `run()` method within a try-catch block to handle deal.II exceptions.
 
----
-
-### E. Output Module
-Manages saving and visualizing the solution:
-- Exports data in **VTK format** for visualization in Paraview  
-- Saves snapshot files at user-defined time intervals
-
-**Files:**
-- `Output.hpp`: declarations for writing VTK files and saving snapshots.
-- `Output.cpp`: implements file writing.
-
----
-
-### F. Main Program
-The main program ties all modules together:
-- Creates the mesh and assigns simulation parameters  
-- Initializes the solver  
-- Runs the time loop  
-- Saves outputs for visualization
-
-**File:** `main.cpp`
-
-
-
+### Build System (`CMakeLists.txt`)
+Manages dependencies, links the deal.II library, and compiles the executable.
