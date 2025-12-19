@@ -176,5 +176,8 @@ This is the core class of the project. It relies on C++ templates to be dimensio
 ### Main Entry Point (`main.cc`)
 A minimal file that initializes the `WaveEquation<2>` object and calls the `run()` method within a try-catch block to handle deal.II exceptions.
 
-### Build System (`CMakeLists.txt`)
-Manages dependencies, links the deal.II library, and compiles the executable.
+### Build System
+
+Dependencies and build are handled through a Docker container made available from the course instructors at https://github.com/HPC-Courses/AMSC-Labs/blob/main/Labs/2025-26/00-environment_setup/README.md#2-linux-users.
+
+Github will be used to keep track of the project files while the container will be handled locally be each partecipant of the project.
