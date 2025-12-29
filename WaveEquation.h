@@ -7,7 +7,8 @@
 // ----------------------------------------------------------------------------
 #include <deal.II/grid/tria.h>
 #include <deal.II/dofs/dof_handler.h>
-#include <deal.II/fe/fe_simplex_p.h>
+#include <deal.II/fe/fe_q.h>                //Added for FE_Q
+// #include <deal.II/fe/fe_simplex_p.h>
 #include <deal.II/lac/sparse_matrix.h>
 #include <deal.II/lac/vector.h>
 #include <deal.II/lac/affine_constraints.h>
@@ -22,7 +23,7 @@ template <int dim>
 class WaveEquation
 {
 public:
-    // Constructior
+    // Constructor
     WaveEquation();
 
     //"Driver" method: manages the entire simulation flow
@@ -46,11 +47,9 @@ private:
     void solve_time_step(); // Calculate u_new using Leapfrog (M*a = RHS)
     void output_results(unsigned int step_number); // Output results for visualization
 
-
-    
     // Mesh e FEM
     Triangulation<dim>   triangulation;
-    FE_SimplexP<dim>     fe;            // Es. P1 (linear)
+    FE_Q<dim>            fe;            // CHANGED FE_Q instead of FE_SimplexP 
     DoFHandler<dim>      dof_handler;
     AffineConstraints<double> constraints; // (Dirichlet boundary conditions)
 

@@ -12,35 +12,88 @@
 #include <iostream>
 #include <fstream>
 
-// Constructor
+//Constructor
 template <int dim>
 WaveEquation<dim>::WaveEquation()
-  : fe(1) // TODO: P2 or P3?
+  : fe(1),                      // Initialization of FE_Q and FE_SimplexP of degree 1,  We are using first degree (linear) polynomials.
+    dof_handler(triangulation), // DoFHandler to mesh
+    time(0.0),                  // Initial time
+    time_step(0.0)              // Temporal step 
 {}
 
+
 // ----------------------------------------------------------------------------
-// BLOCK: Setup e Mesh
+// BLOCK: Setup and Mesh
 // ----------------------------------------------------------------------------
 template <int dim>
 void WaveEquation<dim>::make_grid()
 {
+    std::cout << "Generating grid..." << std::endl;
+
+    // Option A: GridGenerator::hyper_cube(...) for the square
+    // Generates a hypercube (square in 2D) from 0.0 to 1.0
+    GridGenerator::hyper_cube(triangulation, 0.0, 1.0); 
+
+    // Global refinement level
+    // refine_global(6) in 2D means: 4^6 = 4096 cells.
+    // Ideally suited for FE_Q elements.
+    triangulation.refine_global(6);         
+
+    std::cout << "   Number of active cells: " 
+              << triangulation.n_active_cells() 
+              << std::endl;
+}
+
+/*  ##WE NEED TO VERIFY THIS PART for void WaveEquation<dim>::make_grid()##
     // TODO: Implement mesh generation.
     // Option A: GridGenerator::hyper_cube(...) for the square
     // Option B: GridIn to read an external .msh file
     // Option C: refine_global() to refine the mesh
-}
+*/
 
 template <int dim>
 void WaveEquation<dim>::setup_system()
 {
-    // TODO: Distribute the DoFs (dof_handler.distribute_dofs)
+    std::cout << "Setting up system..." << std::endl;
 
-    // TODO: Create the sparsity pattern (DynamicSparsityPattern)
+    // 1. Distribution of DoF (Degrees of Freedom)
+    // Assigns a unique index number to each vertex of the grid.
+    dof_handler.distribute_dofs(fe);    
 
-    // TODO: Reinitialize the matrices (mass_matrix, laplace_matrix) using the pattern
+    std::cout << "   Number of degrees of freedom: " 
+              << dof_handler.n_dofs() 
+              << std::endl;
 
-    // TODO: Reinitialize the vectors (solution_u, u_old, u_new, rhs) to the appropriate size
+    // 2. Sparsity Pattern
+    // Create the map of non-zero elements.
+    DynamicSparsityPattern dsp(dof_handler.n_dofs(), dof_handler.n_dofs());
+    
+    // This function looks at the mesh and the finite element and figures out 
+    // which nodes are neighbors (and therefore will interact in the matrix).
+    DoFTools::make_sparsity_pattern(dof_handler, dsp);
+
+    // We copy the dynamic pattern into a static one (faster for calculation)
+    sparsity_pattern.copy_from(dsp);
+
+    // 3. Matrix Initialization
+    // Allocate memory for matrices based on the pattern
+    mass_matrix.reinit(sparsity_pattern);
+    laplace_matrix.reinit(sparsity_pattern);
+
+    // 4. Vector Initialization
+    // Allocate memory for vectors based on DoF count
+    solution_u.reinit(dof_handler.n_dofs());
+    solution_u_old.reinit(dof_handler.n_dofs());
+    solution_u_new.reinit(dof_handler.n_dofs());
+    system_rhs.reinit(dof_handler.n_dofs());
 }
+
+/*  LET'S VERIFY THIS PART FOR VOID WaveEquation<dim>::setup_system()##
+    // TODO: Distribute the DoFs (dof_handler.distribute_dofs)
+    // TODO: Create the sparsity pattern (DynamicSparsityPattern)
+    // TODO: Reinitialize the matrices (mass_matrix, laplace_matrix) using the pattern
+    // TODO: Reinitialize the vectors (solution_u, u_old, u_new, rhs) to the appropriate size
+*/
 
 // ----------------------------------------------------------------------------
 // Matrices (M e K)
