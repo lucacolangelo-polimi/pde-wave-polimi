@@ -1,0 +1,71 @@
+# ============================
+# Core project ignores
+# ============================
+
+# Ignore everything by default
+*
+
+# ============================
+# Allow specific files/folders
+# ============================
+
+# Allow gitignore itself
+!.gitignore
+
+# Allow your source code
+!src/
+!src/**
+
+# Allow scripts
+!scripts/
+!scripts/**
+
+# Allow Apptainer definition files
+!*.def
+
+# Allow documentation
+!README.md
+!docs/
+!docs/**
+
+# ============================
+# Apptainer / Singularity ignores
+# ============================
+
+# Container images
+*.sif
+
+# Build directories
+.singularity.d/
+apptainer-build/
+
+# Temporary files created during builds
+*.tmp
+*.log
+
+# ============================
+# Common development ignores
+# ============================
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+
+# C/C++ build artifacts
+*.o
+*.so
+*.a
+build/
+dist/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
