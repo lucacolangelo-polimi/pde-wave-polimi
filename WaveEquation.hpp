@@ -1,49 +1,50 @@
 #ifndef WAVE_EQUATION_H
 #define WAVE_EQUATION_H
 
-// ----------------------------------------------------------------------------
-// BLOCK: Include
-// let's include necessary deal.II headers
-// ----------------------------------------------------------------------------
 #include <deal.II/grid/tria.h>
+#include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/grid_in.h>
+
 #include <deal.II/dofs/dof_handler.h>
-#include <deal.II/fe/fe_q.h>                //Added for FE_Q
-// #include <deal.II/fe/fe_simplex_p.h>
-#include <deal.II/lac/sparse_matrix.h>
+#include <deal.II/dofs/dof_tools.h>
+#include <deal.II/dofs/dof_renumbering.h>
+
+#include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_values.h>
+
 #include <deal.II/lac/vector.h>
+#include <deal.II/lac/sparse_matrix.h>
+#include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/precondition.h>
 #include <deal.II/lac/affine_constraints.h>
 
+#include <deal.II/numerics/vector_tools.h>
+#include <deal.II/numerics/matrix_tools.h>
+#include <deal.II/numerics/data_out.h>
+
+#include <fstream>
+#include <iostream>
+#include <memory>
 using namespace dealii;
 
-// ----------------------------------------------------------------------------
-// BLOCK: Classe Template
-// <int dim> for 2D or 3D problems
-// ----------------------------------------------------------------------------
 template <int dim>
 class WaveEquation
 {
 public:
-    // Constructor
-    WaveEquation();
+    
+    WaveEquation();         // Constructor
 
-    //"Driver" method: manages the entire simulation flow
     void run();
 
 private:
-    // ------------------------------------------------------------------------
-    // SECTION1: Setup  and mesh 
-    // ------------------------------------------------------------------------
+
+    // Setup mesh and assemly
     void make_grid();       // Generate square or read from file
     void setup_system();    // Initialize arrays, vectors, and DoFHandlers
-
-    // ------------------------------------------------------------------------
-    // SECTION2 : Assembly Matrices
-    // ------------------------------------------------------------------------
     void assemble_system(); // Construct the Mass (M) and Stiffness (K) Matrix
 
-    // ------------------------------------------------------------------------
-    // SECTION 3: Time evolution 
-    // ------------------------------------------------------------------------
+    // Time evolution 
     void solve_time_step(); // Calculate u_new using Leapfrog (M*a = RHS)
     void output_results(unsigned int step_number); // Output results for visualization
 
@@ -67,6 +68,8 @@ private:
     double time;
     double time_step;
     double end_time;
+    const unsigned int degree = 1;    // polynomial degree (linear)
+    const double       c      = 1.0;  // Velocity of wave propagation
 };
 
 #endif

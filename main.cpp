@@ -1,43 +1,42 @@
-#include "include/WaveEquation.h"
-#include <iostream>
+#include "WaveEquation.hpp"
 
-// ----------------------------------------------------------------------------
-// BLOCK: Main
-// ----------------------------------------------------------------------------
-int main()
+int main(int argc, char *argv[])
 {
-    try
-    {
-        std::cout << "Starting Wave Equation Solver (deal.II)..." << std::endl;
-        
-        // Instantiate the problem in 2 Dimensions
-        WaveEquation<2> wave_problem;
-        
-        // Lancia la simulazione
-        wave_problem.run();
-    }
-    catch (std::exception &exc)
-    {
-        std::cerr << std::endl
-                  << "----------------------------------------------------"
-                  << std::endl;
-        std::cerr << "Exception on processing: " << std::endl
-                  << exc.what() << std::endl
-                  << "Aborting!" << std::endl
-                  << "----------------------------------------------------"
-                  << std::endl;
-        return 1;
-    }
-    catch (...)
-    {
-        std::cerr << std::endl
-                  << "----------------------------------------------------"
-                  << std::endl
-                  << "Unknown exception!" << std::endl
-                  << "Aborting!" << std::endl
-                  << "----------------------------------------------------"
-                  << std::endl;
-        return 1;
-    }
-    return 0;
+  using namespace dealii;
+
+  try
+  {
+
+    Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
+    WaveEquation<2> wave_problem;
+    wave_problem.run();
+  }
+  
+  catch (std::exception &exc)
+  {
+    std::cerr << std::endl
+              << std::endl
+              << "----------------------------------------------------"
+              << std::endl;
+    std::cerr << "Exception on processing: " << std::endl
+              << exc.what() << std::endl
+              << "Aborting!" << std::endl
+              << "----------------------------------------------------"
+              << std::endl;
+    return 1;
+  }
+  catch (...)
+  {
+    std::cerr << std::endl
+              << std::endl
+              << "----------------------------------------------------"
+              << std::endl;
+    std::cerr << "Unknown exception!" << std::endl
+              << "Aborting!" << std::endl
+              << "----------------------------------------------------"
+              << std::endl;
+    return 1;
+  }
+
+  return 0;
 }

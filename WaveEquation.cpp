@@ -1,13 +1,16 @@
-#include "../include/WaveEquation.h"
+#include "WaveEquation.hpp"
 
-#include <deal.II/grid/grid_generator.h>
+
+#include <deal.II/grid/grid_generator.h>  
 #include <deal.II/grid/grid_in.h>
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/vector_tools.h>
+#include <deal.II/fe/mapping_q1.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/precondition.h>
+#include <deal.II/base/function_lib.h>
 
 #include <iostream>
 #include <fstream>
@@ -56,44 +59,33 @@ void WaveEquation<dim>::setup_system()
 {
     std::cout << "Setting up system..." << std::endl;
 
-    // 1. Distribution of DoF (Degrees of Freedom)
-    // Assigns a unique index number to each vertex of the grid.
-    dof_handler.distribute_dofs(fe);    
+    dof_handler.distribute_dofs(fe);
 
     std::cout << "   Number of degrees of freedom: " 
               << dof_handler.n_dofs() 
               << std::endl;
+    constraints.clear();
+    // lets apply Dirichlet BCs (u=0) on boundary_id = 0
+    VectorTools::interpolate_boundary_values(dof_handler,
+                                             0,
+                                             Functions::ZeroFunction<dim>(),
+                                             constraints);
+    constraints.close(); 
 
-    // 2. Sparsity Pattern
-    // Create the map of non-zero elements.
     DynamicSparsityPattern dsp(dof_handler.n_dofs(), dof_handler.n_dofs());
-    
-    // This function looks at the mesh and the finite element and figures out 
-    // which nodes are neighbors (and therefore will interact in the matrix).
-    DoFTools::make_sparsity_pattern(dof_handler, dsp);
+    DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, false);
 
-    // We copy the dynamic pattern into a static one (faster for calculation)
     sparsity_pattern.copy_from(dsp);
 
-    // 3. Matrix Initialization
-    // Allocate memory for matrices based on the pattern
     mass_matrix.reinit(sparsity_pattern);
     laplace_matrix.reinit(sparsity_pattern);
 
-    // 4. Vector Initialization
-    // Allocate memory for vectors based on DoF count
     solution_u.reinit(dof_handler.n_dofs());
     solution_u_old.reinit(dof_handler.n_dofs());
     solution_u_new.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs());
 }
 
-/*  LET'S VERIFY THIS PART FOR VOID WaveEquation<dim>::setup_system()##
-    // TODO: Distribute the DoFs (dof_handler.distribute_dofs)
-    // TODO: Create the sparsity pattern (DynamicSparsityPattern)
-    // TODO: Reinitialize the matrices (mass_matrix, laplace_matrix) using the pattern
-    // TODO: Reinitialize the vectors (solution_u, u_old, u_new, rhs) to the appropriate size
-*/
 
 // ----------------------------------------------------------------------------
 // Matrices (M e K)
@@ -101,83 +93,156 @@ void WaveEquation<dim>::setup_system()
 template <int dim>
 void WaveEquation<dim>::assemble_system()
 {
-// TODO: Define quadrature (e.g., QGaussSimplex)
-// TODO: Initialize FEValues ​​(with update_values, update_gradients, JxW)
+    std::cout << "Assembling matrices..." << std::endl;
 
-// TODO: Loop through all cells (cell iterator)
-// 1. Reinitialize fe_values ​​on the current cell
-// 2. Loop through the quadrature points (q)
-// 3. Loop through i (dofs) and j (dofs)
-// - Calculate M_local: phi_i * phi_j * dx
-// - Calculate K_local: grad_phi_i * grad_phi_j * dx
-// 4. Add local contributions to the global matrices (mass_matrix, laplace_matrix)
+    // Per FE_Q (quadrilaterals), we're using QGauss
+    QGauss<dim> quadrature_formula(fe.degree + 1);
+    FEValues<dim> fe_values(fe, quadrature_formula,
+                            update_values | update_gradients | update_JxW_values);
 
-// Note: The matrices are constant over time; they are assembled only once here.
+    const unsigned int dofs_per_cell = fe.dofs_per_cell;
+    const unsigned int n_q_points    = quadrature_formula.size();
+
+    FullMatrix<double> cell_mass_matrix(dofs_per_cell, dofs_per_cell);
+    FullMatrix<double> cell_laplace_matrix(dofs_per_cell, dofs_per_cell);
+    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
+
+    for (const auto &cell : dof_handler.active_cell_iterators())
+    {
+        fe_values.reinit(cell);
+        cell_mass_matrix = 0;
+        cell_laplace_matrix = 0;
+
+        for (unsigned int q = 0; q < n_q_points; ++q)
+        {
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+            {
+                for (unsigned int j = 0; j < dofs_per_cell; ++j)
+                {
+                    // mass matrix : phi_i * phi_j
+                    cell_mass_matrix(i, j) += (fe_values.shape_value(i, q) *
+                                               fe_values.shape_value(j, q) *
+                                               fe_values.JxW(q));
+
+                    // Laplace Matrix: grad_phi_i * grad_phi_j
+                    cell_laplace_matrix(i, j) += (fe_values.shape_grad(i, q) *
+                                                  fe_values.shape_grad(j, q) *
+                                                  fe_values.JxW(q));
+                }
+            }
+        }
+        cell->get_dof_indices(local_dof_indices);
+        constraints.distribute_local_to_global(cell_mass_matrix, local_dof_indices, mass_matrix);
+        constraints.distribute_local_to_global(cell_laplace_matrix, local_dof_indices, laplace_matrix);
+    }
 }
 
 // ----------------------------------------------------------------------------
 // BLOCK: Time evolution (Solver)
 // ----------------------------------------------------------------------------
 template <int dim>
-void WaveEquation<dim>::solve_time_step()
+void WaveEquation<dim>::solve_time_step()            //**let's verify other iterative methods but CG should be fine for symmetric positive definite matrices like M**
 {
-// TODO: Construct the known term (RHS)
-// Formula: RHS = -c^2 * K * u_n (use vmult)
+    // let's calculate the accelleration 'a': M * a = -c^2 * K * u_n
+    // system_rhs = -c^2 * K * solution_u
+    laplace_matrix.vmult(system_rhs, solution_u);
+    system_rhs *= -(c * c);
 
-// TODO: Solve the linear system M * a = RHS
-// Use SolverCG and PreconditionSSOR to find the acceleration 'a'
+    // Solving M * acc = system_rhs
+    Vector<double> acceleration(dof_handler.n_dofs());
+    SolverControl solver_control(1000, 1e-12 * system_rhs.l2_norm());           
+    SolverCG<Vector<double>> solver(solver_control);
+    
+    // PreconditionIdentity because Mass matrix is well conditioned (**let's verify this assumption**)
+    solver.solve(mass_matrix, acceleration, system_rhs, PreconditionIdentity());
 
-// TODO: Update u_new (Leapfrog)
-// Formula: u_new = 2*u_n - u_old + dt^2 * a
+    // Update u_new = 2*u - u_old + dt^2 * a
+    for (unsigned int i = 0; i < dof_handler.n_dofs(); ++i)
+    {
+        solution_u_new(i) = 2.0 * solution_u(i) - solution_u_old(i) + 
+                            (time_step * time_step) * acceleration(i);
+    }
 
-// TODO: Apply Dirichlet constraints (if necessary, u=0 at the boundary)
+    //let's apply dirichlet boundary conditions
+    constraints.distribute(solution_u_new);
 }
+
 
 template <int dim>
 void WaveEquation<dim>::output_results(unsigned int step)
 {
-    // TODO: DataOut in order to create a file VTK
-    // attach_dof_handler, add_data_vector(solution_u), build_patches, write_vtk
+    DataOut<dim> data_out;
+    data_out.attach_dof_handler(dof_handler);
+    data_out.add_data_vector(solution_u, "displacement");
+    data_out.build_patches();
+
+    std::ofstream output("solution-" + std::to_string(step) + ".vtk");
+    data_out.write_vtk(output);
 }
 
 template <int dim>
 void WaveEquation<dim>::run()
 {
-    // ------------------------------------------------------------------------
-    // MAIN LOOP
-    // ------------------------------------------------------------------------
-    
-    // 1. Preparation
+    std::cout << "Running simulation..." << std::endl;
+
+    // 1. Setup
     make_grid();
     setup_system();
-    assemble_system(); // Assembly of M and K
-    
-    // 2. Initial Conditions
-    // TODO: Set u_old and u_current (e.g., VectorTools::interpolate or manually)
-    
+    assemble_system();
+
+    // 2. Initial Conditions (The "Pebble in the Pond")
+    std::cout << "Setting initial conditions..." << std::endl;
+  
+    const double amplitude = 1.0;
+    const Point<dim> center(0.5, 0.5);
+    const double width = 0.1;
+
+    // Recuperiamo la posizione geometrica di ogni Grado di Libertà (DoF)
+    std::vector<Point<dim>> support_points(dof_handler.n_dofs());
+    DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
+
+    // Calcoliamo il valore della Gaussiana per ogni nodo della mesh
+    for (unsigned int i = 0; i < dof_handler.n_dofs(); ++i)
+    {
+        double distance_sq = center.distance_square(support_points[i]);
+        solution_u(i) = amplitude * std::exp(-distance_sq / (width * width));
+    }
+
+    // Velocità iniziale nulla: u_old = u_current
+    solution_u_old = solution_u;
+
+    // Applichiamo i vincoli al bordo (Dirichlet u=0)
+    constraints.distribute(solution_u);
+    constraints.distribute(solution_u_old);
+
+    output_results(0);
+
     // 3. Temporal Loop
     time = 0.0;
-    time_step = 0.001; /
+    const double end_time = 1.0; 
+    time_step = 0.001; // Assicurati che soddisfi CFL: dt < h/c
     
     unsigned int step = 0;
-    while (time < 1.0) // TODO: end_time
+    while (time < end_time)
     {
+        step++;
+        time += time_step;
+
         solve_time_step();
-        
-        // Shift 
+
+        // Shift dei vettori per lo schema Leapfrog
         solution_u_old = solution_u;
-        solution_u = solution_u_new;
+        solution_u     = solution_u_new;
         
-        // Output every x steps (10 for now)
-        if (step % 10 == 0) {
+        if (step % 10 == 0) 
+        {
+            std::cout << "Step " << step << " at time " << time << std::endl;
             output_results(step);
         }
-        
-        time += time_step;
-        step++;
     }
+    
+    std::cout << "Simulation finished." << std::endl;
 }
-
 // ----------------------------------------------------------------------------
 // BLOCK: Template Instantiation
 // Necessary because we declare in .h and implement in .cc
