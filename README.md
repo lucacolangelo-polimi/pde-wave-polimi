@@ -144,7 +144,7 @@ $$
 In the deal.II implementation, solving $M^{-1}$ typically involves solving a linear system ($M a = RHS$) at each step using a Solver (like Conjugate Gradient) or using Mass Lumping techniques.
 
 ## e. Output and Analysis
-- The solution is exported at regular time intervals using `DataOut` in **VTK format**.
+- The solution is exported at regular time intervals using `DataOut` in **VTU format**, orchestrated by a master `.pvd` playlist file to handle Adaptive Mesh Refinement (AMR).
 - Results can be visualized in **Paraview** to observe wave propagation, reflection, and interference.
 
 ---
@@ -178,3 +178,17 @@ A minimal file that initializes the `WaveEquation<2>` object and calls the `run(
 
 ### Build System (`CMakeLists.txt`)
 Manages dependencies, links the deal.II library, and compiles the executable.
+
+---
+
+# 7. How to Visualize with ParaView
+
+To see the wave in action after running the simulation:
+
+1. Open **ParaView**.
+2. Go to **File -> Open** and navigate to your `build` folder.
+3. Select the **`solution.pvd`** file (do *not* load the individual `.vtu` files, as the `.pvd` file gracefully handles the dynamically changing adaptive mesh).
+4. Click the green **Apply** button in the Properties panel.
+5. In the toolbar above the 3D view, change the coloring from `Solid Color` to **`displacement`**.
+6. To see the wave in 3D: go to **Filters -> Alphabetical -> Warp By Scalar**. Make sure the *Scalars* property is set to `displacement`, set the *Scale Factor* to `1.0` or `2.0`, and click **Apply**.
+7. Ensure your camera is in **3D** mode, tilt the view, and press the **Play** button in the top toolbar to watch the wave propagate!

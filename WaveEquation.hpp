@@ -43,6 +43,7 @@ private:
     void make_grid();       // Generate square or read from file
     void setup_system();    // Initialize arrays, vectors, and DoFHandlers
     void assemble_system(); // Construct the Mass (M) and Stiffness (K) Matrix
+    void refine_mesh();     // Adaptive Mesh Refinement (AMR)
 
     // Time evolution 
     void solve_time_step(); // Calculate u_new using Leapfrog (M*a = RHS)

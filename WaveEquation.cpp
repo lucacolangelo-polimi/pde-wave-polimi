@@ -11,9 +11,13 @@
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/precondition.h>
 #include <deal.II/base/function_lib.h>
+#include <deal.II/numerics/error_estimator.h>
+#include <deal.II/grid/grid_refinement.h>
+#include <deal.II/numerics/solution_transfer.h>
 
 #include <iostream>
 #include <fstream>
+#include <map>
 
 //Constructor
 template <int dim>
@@ -198,8 +202,78 @@ void WaveEquation<dim>::output_results(unsigned int step)
     data_out.add_data_vector(solution_u, "displacement");
     data_out.build_patches();
 
-    std::ofstream output("solution-" + std::to_string(step) + ".vtk");
-    data_out.write_vtk(output);
+    std::ofstream output("solution-" + std::to_string(step) + ".vtu");
+    data_out.write_vtu(output);
+}
+
+// ----------------------------------------------------------------------------
+// BLOCK: Adaptive Mesh Refinement (AMR)
+// ----------------------------------------------------------------------------
+template <int dim>
+void WaveEquation<dim>::refine_mesh()
+{
+    Vector<float> estimated_error_per_cell(triangulation.n_active_cells());
+    KellyErrorEstimator<dim>::estimate(
+        dof_handler,
+        QGauss<dim - 1>(fe.degree + 1),
+        std::map<types::boundary_id, const Function<dim> *>(),
+        solution_u,
+        estimated_error_per_cell);
+
+    // Refine cells with the highest 30% error, coarsen the lowest 10%
+    GridRefinement::refine_and_coarsen_fixed_fraction(
+        triangulation, estimated_error_per_cell, 0.3, 0.1);
+
+    // Enforce a maximum refinement level to maintain the CFL condition (dt < h/c)
+    // With dt=0.001 and c=1.0, level 8 gives h~0.0039, which is safe!
+    if (triangulation.n_levels() > 8)
+    {
+        for (const auto &cell : triangulation.active_cell_iterators())
+        {
+            if (cell->level() >= 8)
+                cell->clear_refine_flag();
+        }
+    }
+
+    triangulation.prepare_coarsening_and_refinement();
+
+    SolutionTransfer<dim, Vector<double>> solution_transfer(dof_handler);
+    std::vector<Vector<double>> x_vectors = {solution_u, solution_u_old};
+    solution_transfer.prepare_for_coarsening_and_refinement(x_vectors);
+
+    triangulation.execute_coarsening_and_refinement();
+
+    // Re-distribute DoFs for the new mesh
+    dof_handler.distribute_dofs(fe);
+
+    // Interpolate the old solutions to the new grid
+    std::vector<Vector<double>> tmp_vectors(2, Vector<double>(dof_handler.n_dofs()));
+    solution_transfer.interpolate(x_vectors, tmp_vectors);
+
+    // Rebuild constraints and matrices
+    constraints.clear();
+    VectorTools::interpolate_boundary_values(dof_handler,
+                                             0,
+                                             Functions::ZeroFunction<dim>(),
+                                             constraints);
+    constraints.close();
+
+    DynamicSparsityPattern dsp(dof_handler.n_dofs(), dof_handler.n_dofs());
+    DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, false);
+    sparsity_pattern.copy_from(dsp);
+
+    mass_matrix_diagonal.reinit(dof_handler.n_dofs());
+    laplace_matrix.reinit(sparsity_pattern);
+
+    solution_u = tmp_vectors[0];
+    solution_u_old = tmp_vectors[1];
+    solution_u_new.reinit(dof_handler.n_dofs());
+    system_rhs.reinit(dof_handler.n_dofs());
+
+    constraints.distribute(solution_u);
+    constraints.distribute(solution_u_old);
+
+    assemble_system(); // Re-assemble the Lumped Mass and Laplace matrices!
 }
 
 template <int dim>
@@ -238,6 +312,10 @@ void WaveEquation<dim>::run()
     constraints.distribute(solution_u_old);
 
     output_results(0);
+    
+    // Keep track of files and times for the ParaView master file (.pvd)
+    std::vector<std::pair<double, std::string>> times_and_names;
+    times_and_names.push_back(std::make_pair(0.0, "solution-0.vtu"));
 
     // 3. Temporal Loop
     time = 0.0;
@@ -248,6 +326,13 @@ void WaveEquation<dim>::run()
     while (time < end_time)
     {
         step++;
+
+        // Adapt the mesh dynamically every 20 time steps
+        if (step % 20 == 0)
+        {
+            refine_mesh();
+        }
+
         time += time_step;
 
         solve_time_step();
@@ -260,6 +345,11 @@ void WaveEquation<dim>::run()
         {
             std::cout << "Step " << step << " at time " << time << std::endl;
             output_results(step);
+
+            // Update the .pvd playlist file
+            times_and_names.push_back(std::make_pair(time, "solution-" + std::to_string(step) + ".vtu"));
+            std::ofstream pvd_output("solution.pvd");
+            DataOutBase::write_pvd_record(pvd_output, times_and_names);
         }
     }
     
