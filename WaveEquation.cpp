@@ -77,7 +77,7 @@ void WaveEquation<dim>::setup_system()
 
     sparsity_pattern.copy_from(dsp);
 
-    mass_matrix.reinit(sparsity_pattern);
+    mass_matrix_diagonal.reinit(dof_handler.n_dofs());
     laplace_matrix.reinit(sparsity_pattern);
 
     solution_u.reinit(dof_handler.n_dofs());
@@ -98,32 +98,36 @@ void WaveEquation<dim>::assemble_system()
     // Per FE_Q (quadrilaterals), we're using QGauss
     QGauss<dim> quadrature_formula(fe.degree + 1);
     FEValues<dim> fe_values(fe, quadrature_formula,
-                            update_values | update_gradients | update_JxW_values);
+                            update_gradients | update_JxW_values);
+
+    // For Mass Lumping, we use Gauss-Lobatto quadrature
+    QGaussLobatto<dim> quadrature_formula_mass(fe.degree + 1);
+    FEValues<dim> fe_values_mass(fe, quadrature_formula_mass,
+                                 update_values | update_JxW_values);
 
     const unsigned int dofs_per_cell = fe.dofs_per_cell;
-    const unsigned int n_q_points    = quadrature_formula.size();
+    const unsigned int n_q_points          = quadrature_formula.size();
+    const unsigned int n_q_points_mass     = quadrature_formula_mass.size();
 
-    FullMatrix<double> cell_mass_matrix(dofs_per_cell, dofs_per_cell);
     FullMatrix<double> cell_laplace_matrix(dofs_per_cell, dofs_per_cell);
+    Vector<double>     cell_mass_diagonal(dofs_per_cell);
     std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
 
     for (const auto &cell : dof_handler.active_cell_iterators())
     {
         fe_values.reinit(cell);
-        cell_mass_matrix = 0;
+        fe_values_mass.reinit(cell);
+        
+        cell_mass_diagonal = 0;
         cell_laplace_matrix = 0;
 
+        // Assemble Stiffness Matrix using standard QGauss
         for (unsigned int q = 0; q < n_q_points; ++q)
         {
             for (unsigned int i = 0; i < dofs_per_cell; ++i)
             {
                 for (unsigned int j = 0; j < dofs_per_cell; ++j)
                 {
-                    // mass matrix : phi_i * phi_j
-                    cell_mass_matrix(i, j) += (fe_values.shape_value(i, q) *
-                                               fe_values.shape_value(j, q) *
-                                               fe_values.JxW(q));
-
                     // Laplace Matrix: grad_phi_i * grad_phi_j
                     cell_laplace_matrix(i, j) += (fe_values.shape_grad(i, q) *
                                                   fe_values.shape_grad(j, q) *
@@ -131,9 +135,28 @@ void WaveEquation<dim>::assemble_system()
                 }
             }
         }
+
+        // Assemble Lumped Mass Matrix using QGaussLobatto
+        for (unsigned int q = 0; q < n_q_points_mass; ++q)
+        {
+            for (unsigned int i = 0; i < dofs_per_cell; ++i)
+            {
+                // With Gauss-Lobatto, shape functions are 1 at their node and 0 at others.
+                // We only need to compute and store the diagonal entries.
+                cell_mass_diagonal(i) += (fe_values_mass.shape_value(i, q) *
+                                          fe_values_mass.shape_value(i, q) *
+                                          fe_values_mass.JxW(q));
+            }
+        }
+
         cell->get_dof_indices(local_dof_indices);
-        constraints.distribute_local_to_global(cell_mass_matrix, local_dof_indices, mass_matrix);
         constraints.distribute_local_to_global(cell_laplace_matrix, local_dof_indices, laplace_matrix);
+
+        // Directly add local lumped mass to the global diagonal vector
+        for (unsigned int i = 0; i < dofs_per_cell; ++i)
+        {
+            mass_matrix_diagonal(local_dof_indices[i]) += cell_mass_diagonal(i);
+        }
     }
 }
 
@@ -148,13 +171,12 @@ void WaveEquation<dim>::solve_time_step()            //**let's verify other iter
     laplace_matrix.vmult(system_rhs, solution_u);
     system_rhs *= -(c * c);
 
-    // Solving M * acc = system_rhs
+    // Direct scalar division for lumped mass matrix: acc = system_rhs / M_diagonal
     Vector<double> acceleration(dof_handler.n_dofs());
-    SolverControl solver_control(1000, 1e-12 * system_rhs.l2_norm());           
-    SolverCG<Vector<double>> solver(solver_control);
-    
-    // PreconditionIdentity because Mass matrix is well conditioned (**let's verify this assumption**)
-    solver.solve(mass_matrix, acceleration, system_rhs, PreconditionIdentity());
+    for (unsigned int i = 0; i < dof_handler.n_dofs(); ++i)
+    {
+        acceleration(i) = system_rhs(i) / mass_matrix_diagonal(i);
+    }
 
     // Update u_new = 2*u - u_old + dt^2 * a
     for (unsigned int i = 0; i < dof_handler.n_dofs(); ++i)

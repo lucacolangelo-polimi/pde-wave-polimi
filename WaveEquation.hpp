@@ -55,7 +55,7 @@ private:
     AffineConstraints<double> constraints; // (Dirichlet boundary conditions)
 
     SparsityPattern      sparsity_pattern;
-    SparseMatrix<double> mass_matrix;     // Matrix M
+    Vector<double>       mass_matrix_diagonal; // Lumped Mass Matrix (diagonal only)
     SparseMatrix<double> laplace_matrix;  // Matrix K (Stiffness)
 
     // Vector solution (Leapfrog requires 3 steps)
