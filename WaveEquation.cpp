@@ -14,6 +14,8 @@
 
 #include <iostream>
 #include <fstream>
+#include <limits>
+#include <algorithm>
 
 //Constructor
 template <int dim>
@@ -40,7 +42,14 @@ void WaveEquation<dim>::make_grid()
     // Global refinement level
     // refine_global(6) in 2D means: 4^6 = 4096 cells.
     // Ideally suited for FE_Q elements.
-    triangulation.refine_global(6);         
+    if (dim == 2)
+    {
+        triangulation.refine_global(6);
+    }
+    else if (dim == 3)
+    {
+        triangulation.refine_global(5); // 8^5 = 32768 cells, to keep the problem size manageable in 3D
+    }
 
     std::cout << "   Number of active cells: " 
               << triangulation.n_active_cells() 
@@ -176,8 +185,12 @@ void WaveEquation<dim>::output_results(unsigned int step)
     data_out.add_data_vector(solution_u, "displacement");
     data_out.build_patches();
 
-    std::ofstream output("solution-" + std::to_string(step) + ".vtk");
-    data_out.write_vtk(output);
+   std::string filename = "solution-" + 
+                           std::to_string(dim) + "d-" + 
+                           std::to_string(step) + ".vtu";
+
+    std::ofstream output(filename);
+    data_out.write_vtu(output);
 }
 
 template <int dim>
@@ -194,7 +207,11 @@ void WaveEquation<dim>::run()
     std::cout << "Setting initial conditions..." << std::endl;
   
     const double amplitude = 1.0;
-    const Point<dim> center(0.5, 0.5);
+
+    Point<dim> center;                          //doing so, the generation of the starting point is independent of the dimension of the problem, and we can easily change the dimension without worrying about the initial condition generation.
+    for (unsigned int d = 0; d < dim; ++d) {
+    center(d) = 0.5; // Centro del dominio [0,1]^dim
+}
     const double width = 0.1;
 
     // Recuperiamo la posizione geometrica di ogni Grado di Libertà (DoF)
@@ -220,7 +237,29 @@ void WaveEquation<dim>::run()
     // 3. Temporal Loop
     time = 0.0;
     const double end_time = 1.0; 
-    time_step = 0.001; // Assicurati che soddisfi CFL: dt < h/c
+    // ---------------------------------------------------------
+    // CALCOLO DINAMICO DEL PASSO TEMPORALE (Condizione CFL)
+    // ---------------------------------------------------------
+    std::cout << "Calcolo del passo temporale per la stabilità CFL..." << std::endl;
+
+    double h_min = std::numeric_limits<double>::max();
+    
+    // Iteriamo su tutte le celle attive per trovare la minima distanza tra i vertici
+    for (const auto &cell : triangulation.active_cell_iterators())
+    {
+        h_min = std::min(h_min, cell->minimum_vertex_distance());
+    }
+
+    // Impostiamo il Numero di Courant. 
+    // Valori tipici per Leapfrog + FE_Q(1) + Massa Consistente sono tra 0.1 e 0.5.
+    const double courant_number = 0.2; 
+
+    // Calcolo del time_step: dt = C * (h_min / c)
+    time_step = courant_number * h_min / c;
+
+    std::cout << "   Distanza minima h_min: " << h_min << std::endl;
+    std::cout << "   Passo temporale dt: " << time_step << std::endl;
+    // ---------------------------------------------------------
     
     unsigned int step = 0;
     while (time < end_time)
@@ -247,4 +286,5 @@ void WaveEquation<dim>::run()
 // BLOCK: Template Instantiation
 // Necessary because we declare in .h and implement in .cc
 // ----------------------------------------------------------------------------
+template class WaveEquation<3>; //If you want to change dimensions, just change this line and recompile
 template class WaveEquation<2>;

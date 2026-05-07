@@ -8,8 +8,8 @@ int main(int argc, char *argv[])
   {
 
     Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
-    WaveEquation<2> wave_problem;
-    wave_problem.run();
+    WaveEquation<3> wave_problem3D; // Create an instance of the WaveEquation class for 3D
+    wave_problem3D.run();
   }
   
   catch (std::exception &exc)
