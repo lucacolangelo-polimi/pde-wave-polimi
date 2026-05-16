@@ -3,7 +3,7 @@ project(wave_equation)
 
 find_package(deal.II 9.0 REQUIRED)
 
-add_executable(wave_equation main.cpp WaveEquation.cpp)
+add_executable(wave_equation mainOptimized.cpp WaveEquationOptimized.cpp)          
 
 deal_ii_setup_target(wave_equation)
 
