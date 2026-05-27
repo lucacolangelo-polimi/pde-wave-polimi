@@ -1,9 +1,4 @@
-// ============================================================
-// main.cpp
-//
-// Entry point for the WaveEquation FEM solver.
-// Uncomment the desired SimulationMode to switch behaviour.
-// ============================================================
+
 #include "WaveEquationOptimized.hpp"
 
 int main(int argc, char *argv[])

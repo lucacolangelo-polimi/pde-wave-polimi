@@ -29,9 +29,7 @@
 #include <deal.II/dofs/dof_renumbering.h>
 #include <deal.II/fe/fe_q.h>
 //#include <deal.II/fe/fe_values.h>
-// In questo (il percorso corretto nella libreria deal.II è senza il primo 'fe_'):
 #include <deal.II/fe/fe_values.h> 
-// Oppure, se intendevi proprio i valori sulle facce:
 //#include <deal.II/fe/fe_face_values.h> // Verifica che non ci siano errori di battitura
 #include <deal.II/fe/fe_system.h>
 #include <deal.II/lac/vector.h>
