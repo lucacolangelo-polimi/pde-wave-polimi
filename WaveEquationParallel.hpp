@@ -12,7 +12,7 @@
 #include <deal.II/dofs/dof_renumbering.h>
 #include <deal.II/fe/fe_q.h>                        // FE Q1, Q2, ...
 #include <deal.II/fe/fe_values.h>
-#include <deal.II/fe/fe_face_values.h>
+//#include <deal.II/fe/fe_face_values.h>
 #include <deal.II/fe/mapping_q1.h>
 #include <deal.II/lac/trilinos_sparse_matrix.h>     // Trilinos sparse matrix
 #include <deal.II/lac/trilinos_vector.h>
@@ -156,6 +156,29 @@ template <int dim>
 class WaveEquation
 {
 public:
+
+    // struct for dispersion analysis results
+    struct DispersionResult
+    {
+        double k;              // Tested wave number
+        double kh;             // Dimensionless wave number
+        double c_numerical;    // Measured numerical phase velocity
+        double c_exact;        // Exact phase velocity (= c)
+        double relative_error; // (c_h - c) / c
+    };
+
+    struct ScalingResult
+    {
+        unsigned int n_procs;
+        unsigned int n_dofs;
+        unsigned int n_cells;
+        double wall_time_total;    // Total elapsed time [s]
+        double wall_time_assembly; // Assembly time only [s]
+        double wall_time_solve;    // Solve time only [s]
+        double wall_time_output;   // Output/I/O time only [s]
+        double speedup;            // Speedup relative to 1 process
+        double efficiency;         // Speedup / n_procs
+    };
     
     double c             = 1.0;     // public parameters 
     double damping       = 0.0;
@@ -201,6 +224,16 @@ public:
         assemble_matrices();
     }
 
+    // Performs n_steps time steps and measures performance (disables disk output to focus on raw compute time)
+    ScalingResult run_scaling_benchmark(unsigned int n_steps);
+
+        // Prints and saves the formatted scaling table
+    void print_scaling_table(const std::vector<ScalingResult> &results,
+                             const std::string &label) const;           //const!!!
+
+    // Launches the analysis for a list of wave numbers and Returns a table of results (one per wave number)
+    std::vector<DispersionResult> run_dispersion_analysis(const std::vector<double> &wave_numbers);
+
 private:
     // MPI
     MPI_Comm           mpi_comm;      // MPI communicator
@@ -240,42 +273,9 @@ private:
     void build_newmark_system_matrix();
 
 
-    // Plane wave for dispersion analysis
-    struct DispersionResult
-    {
-        double k;              // Tested wave number
-        double kh;             // Dimensionless wave number
-        double c_numerical;    // Measured numerical phase velocity
-        double c_exact;        // Exact phase velocity (= c)
-        double relative_error; // (c_h - c) / c
-    };
-    // Launches the analysis for a list of wave numbers and Returns a table of results (one per wave number)
-    std::vector<DispersionResult> run_dispersion_analysis(
-        const std::vector<double> &wave_numbers);
     // Measures the numerical ω for a single wave number k ia phase correlation <u_h(T), u_exact(T)>
     double measure_numerical_phase_speed(double k, double n_periods);
 
-
-    // Struct to store benchmarking results
-    struct ScalingResult
-    {
-        unsigned int n_procs;
-        unsigned int n_dofs;
-        unsigned int n_cells;
-        double wall_time_total;    // Total elapsed time [s]
-        double wall_time_assembly; // Assembly time only [s]
-        double wall_time_solve;    // Solve time only [s]
-        double wall_time_output;   // Output/I/O time only [s]
-        double speedup;            // Speedup relative to 1 process
-        double efficiency;         // Speedup / n_procs
-    };
-
-    // Performs n_steps time steps and measures performance (disables disk output to focus on raw compute time)
-    ScalingResult run_scaling_benchmark(unsigned int n_steps);
-
-    // Prints and saves the formatted scaling table
-    void print_scaling_table(const std::vector<ScalingResult> &results,
-                             const std::string &label);
 
     //FEM data structures
 

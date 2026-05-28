@@ -1,79 +1,55 @@
-# WaveEquation — Solver FEM MPI-parallelo
+# WaveEquation — MPI-parallel FEM solver
 
-## Dipendenze
+## Dependencies
 
-| Libreria | Versione | Ruolo |
+| Library | Version | Role |
 |----------|----------|-------|
-| deal.II | ≥ 9.4 | framework FEM |
-| MPI | qualsiasi | comunicazione inter-processo |
-| Trilinos | ≥ 13.0 | matrici/vettori distribuiti |
-| p4est | ≥ 2.3 | mesh distribuita |
+| deal.II | ≥ 9.4 | FEM framework |
+| MPI | any | inter-process communication |
+| Trilinos | ≥ 13.0 | distributed matrices/vectors |
+| p4est | ≥ 2.3 | distributed mesh |
 
-## Compilazione
+## Compilation
 
 ```bash
 mkdir build && cd build
 cmake -DDEAL_II_DIR=/path/to/dealii ..
 make -j$(nproc)
-```
 
-## Esecuzione
-
-```bash
-# 4 processi MPI
+# 4 MPI processes
 mpirun -np 4 ./wave_equation
 
-# 8 processi MPI (consigliato per mesh fine, livello 7+)
+# 8 MPI processes (recommended for fine meshes, level 7+)
 mpirun -np 8 ./wave_equation
 
-# Studio di convergenza MMS (decommenta in main.cpp)
+# MMS convergence study (uncomment in main.cpp)
 mpirun -np 4 ./wave_equation
-```
 
-## Architettura MPI
 
-```
-parallel::distributed::Triangulation  →  mesh partizionata (p4est)
+parallel::distributed::Triangulation  →  partitioned mesh (p4est)
          ↓
-DoFHandler::distribute_dofs()         →  DoF assegnati a ogni processo
+DoFHandler::distribute_dofs()         →  DoFs assigned to each process
          ↓
-IndexSet: locally_owned_dofs          →  DoF "posseduti" da questo rank
-IndexSet: locally_relevant_dofs       →  owned + ghost (vicini)
+IndexSet: locally_owned_dofs          →  DoFs "owned" by this rank
+IndexSet: locally_relevant_dofs       →  owned + ghost (neighbors)
          ↓
-TrilinosWrappers::SparseMatrix        →  righe distribuite tra processi
-TrilinosWrappers::MPI::Vector         →  vettori distribuiti
+TrilinosWrappers::SparseMatrix        →  rows distributed among processes
+TrilinosWrappers::MPI::Vector         →  distributed vectors
          ↓
 assemble_matrices()  [owned cells]    →  compress(add) → MPI_Allreduce
          ↓
 solve_time_step() Leapfrog:
-  a = M⁻¹·RHS   [locale, no MPI]     →  u_new = 2u - u_old + dt²·a
-         ↓ oppure
+  a = M⁻¹·RHS   [local, no MPI]      →  u_new = 2u - u_old + dt²·a
+         ↓ or
 solve_time_step_newmark():
-  SolverCG Trilinos                   →  MPI_Allreduce interni al solver
+  Trilinos SolverCG                   →  internal solver MPI_Allreduce
          ↓
 output_results():
-  ogni rank → solution-NNNN-RRRR.vtu
+  each rank → solution-NNNN-RRRR.vtu
   rank 0    → solution-NNNN.pvtu + solution.pvd
-```
 
-## Vettori: owned vs ghost
-
-| Tipo | IndexSet | Uso |
-|------|----------|-----|
-| `owned_solution_u` | `locally_owned_dofs` | scrittura (assembly, update) |
-| `solution_u` | `locally_relevant_dofs` | lettura (vmult, output) |
-
-Dopo ogni aggiornamento owned, chiama `solution_u.update_ghost_values()`
-per propagare i valori ai processi vicini.
-
-## Visualizzazione con ParaView
-
-```bash
-# Apri il file master PVD (contiene tutti i timestep)
+  # Open the master PVD file (contains all timesteps)
 paraview solution.pvd
 
-# Oppure apri un singolo PVTU
+# Or open a single PVTU file
 paraview solution-0010.pvtu
-```
-
-Il campo `mpi_rank` nell'output mostra la partizione della mesh tra i processi.

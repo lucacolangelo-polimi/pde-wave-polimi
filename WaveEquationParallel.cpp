@@ -1,4 +1,3 @@
-
 #include "WaveEquationParallel.hpp"
 
 #include <deal.II/distributed/tria.h>
@@ -34,11 +33,11 @@ WaveEquation<dim>::WaveEquation(MPI_Comm mpi_communicator)
     , fe_ptr(std::make_unique<FE_Q<dim>>(1))
     , dof_handler(triangulation)
     , time(0.0)
-    , step_number(0)
-    , newmark_matrix_is_current(false)
+    , newmark_matrix_is_current(false)      
+    , step_number(0)                         
 {}
 
-/
+
 // wave_speed_at: c(x) — constant or eterogeneous (rifraction)
 template <int dim>
 double WaveEquation<dim>::wave_speed_at(const Point<dim> &p) const
@@ -111,7 +110,7 @@ void WaveEquation<dim>::setup_system()
     // locally_owned_dofs: those that this process "possesses"
     locally_owned_dofs    = dof_handler.locally_owned_dofs();
     // locally_relevant_dofs: owned + ghost (neighboring DoF needed for assembly)
-    locally_relevant_dofs = DoFTools::extract_locally_relevant_dofs(dof_handler);
+    DoFTools::extract_locally_relevant_dofs(dof_handler, locally_relevant_dofs);
 
     pcout << "  DoF global: " << dof_handler.n_dofs()
           << "  (this process: " << locally_owned_dofs.n_elements() << ")\n";
@@ -142,8 +141,9 @@ void WaveEquation<dim>::setup_system()
             std::vector<types::global_dof_index> dof_ids(fe_ptr->dofs_per_cell);
             cell->get_dof_indices(dof_ids);
             for (auto idx : dof_ids)
-                if (locally_relevant_dofs.is_element(idx))
-                    constraints.add_constraint(idx, {}, 0.0);
+                if (locally_relevant_dofs.is_element(idx)){
+                    constraints.add_line(idx);
+                    constraints.set_inhomogeneity(idx, 0.0);}
         }
     }
     constraints.close();
@@ -785,7 +785,7 @@ void WaveEquation<dim>::refine_mesh()
     // Redistributes DoF on new mesh
     dof_handler.distribute_dofs(*fe_ptr);
     locally_owned_dofs    = dof_handler.locally_owned_dofs();
-    locally_relevant_dofs = DoFTools::extract_locally_relevant_dofs(dof_handler);
+    DoFTools::extract_locally_relevant_dofs(dof_handler, locally_relevant_dofs);
 
     pcout << "  AMR: DoF globali=" << dof_handler.n_dofs()
           << "  celle=" << triangulation.n_global_active_cells() << "\n";
