@@ -1,53 +1,20 @@
-#ifndef WAVE_EQUATION_H
-#define WAVE_EQUATION_H
+#ifndef WAVE_EQUATIONPARALLEL_H
+#define WAVE_EQUATIONPARALLEL_H
 
-// ============================================================
-// WaveEquation.hpp  —  FEM solver MPI-parallelo per l'equazione
-// delle onde 2D/3D con deal.II + Trilinos
-//
-//   u_tt − c²(x)·Δu + d·u_t = f(x,t)    in Ω
-//   u = g                                  su ∂Ω
-//   u(0) = u0,   u_t(0) = u1              in Ω
-//
-// Parallelismo MPI:
-//   - parallel::distributed::Triangulation  : mesh distribuita (p4est)
-//   - DoFHandler su mesh distribuita
-//   - TrilinosWrappers::SparseMatrix        : matrici distribuite
-//   - TrilinosWrappers::MPI::Vector         : vettori distribuiti
-//   - SolverCG con precondizionatore SSOR   : per Newmark
-//   - Ogni processo assembla solo le celle locally_owned
-//   - Comunicazione implicita via Trilinos/MPI
-//
-// Schema temporale: Leapfrog esplicito (default) o Newmark-β implicito
-// Massa: Lumped via Gauss-Lobatto
-// AMR:   KellyErrorEstimator + parallel::distributed::SolutionTransfer
-// ABC:   Sommerfeld (FEFaceValues)
-// Validazione: MMS con ConvergenceTable, energia discreta
-// ============================================================
-
-// ---- deal.II distributed ----
-#include <deal.II/distributed/tria.h>
+#include <deal.II/distributed/tria.h>               // deal.II distributed 
 #include <deal.II/distributed/solution_transfer.h>
 #include <deal.II/distributed/grid_refinement.h>
-
-// ---- Grid ----
-#include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/grid_generator.h>            // grid
 #include <deal.II/grid/grid_in.h>
 #include <deal.II/grid/grid_tools.h>
-
-// ---- DoF ----
-#include <deal.II/dofs/dof_handler.h>
+#include <deal.II/dofs/dof_handler.h>               // DoF handler
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/dofs/dof_renumbering.h>
-
-// ---- FE ----
-#include <deal.II/fe/fe_q.h>
+#include <deal.II/fe/fe_q.h>                        // FE Q1, Q2, ...
 #include <deal.II/fe/fe_values.h>
 #include <deal.II/fe/fe_face_values.h>
 #include <deal.II/fe/mapping_q1.h>
-
-// ---- LAC Trilinos (vettori e matrici MPI) ----
-#include <deal.II/lac/trilinos_sparse_matrix.h>
+#include <deal.II/lac/trilinos_sparse_matrix.h>     // Trilinos sparse matrix
 #include <deal.II/lac/trilinos_vector.h>
 #include <deal.II/lac/trilinos_precondition.h>
 #include <deal.II/lac/trilinos_solver.h>
@@ -56,14 +23,10 @@
 #include <deal.II/lac/sparsity_tools.h>
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/vector.h>
-
-// ---- Numerics ----
-#include <deal.II/numerics/vector_tools.h>
+#include <deal.II/numerics/vector_tools.h>          // numerics
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/numerics/error_estimator.h>
-
-// ---- Base ----
-#include <deal.II/base/conditional_ostream.h>   // stampa solo da rank 0
+#include <deal.II/base/conditional_ostream.h>       // prints only on rank 0
 #include <deal.II/base/index_set.h>
 #include <deal.II/base/utilities.h>
 #include <deal.II/base/mpi.h>
@@ -83,37 +46,31 @@
 
 using namespace dealii;
 
-// ============================================================
-//  Shorthand per i tipi Trilinos MPI usati ovunque
-// ============================================================
-using TrilinosVector = TrilinosWrappers::MPI::Vector;
+
+using TrilinosVector = TrilinosWrappers::MPI::Vector;               /// Shorthand for Trilinos MPI vector
 using TrilinosMatrix = TrilinosWrappers::SparseMatrix;
 
-// ============================================================
-//  Modalità di simulazione
-// ============================================================
+// SIMULATION MODES
 enum class SimulationMode
 {
-    PEBBLE_IN_POND,  // Gaussiana + Dirichlet + AMR
-    MMS_CONVERGENCE, // Soluzione esatta (standing wave), convergence study
-    DAMPED_WAVE,     // Gaussiana + smorzamento viscoso
-    ABSORBING_BC,    // Gaussiana + condizioni assorbenti di Sommerfeld
-    INTERFERENCE,    // Due sorgenti gaussiane (sovrapposizione)
-    REFRACTION,      // c = c(x): mezzo eterogeneo
-    DIFFRACTION,     // Ostacolo interno + fenditura
+    PEBBLE_IN_POND,  // Gaussian pulse + Dirichlet BC + AMR
+    MMS_CONVERGENCE, // Exact solution (standing wave), convergence study
+    DAMPED_WAVE,     // Gaussian pulse + viscous damping
+    ABSORBING_BC,    // Gaussian pulse + Sommerfeld absorbing BCs
+    INTERFERENCE,    // Two Gaussian sources (superposition)
+    REFRACTION,      // c = c(x): heterogeneous medium
+    DIFFRACTION,     // Internal obstacle + slit
 };
 
-// ============================================================
-//  Schema temporale
-// ============================================================
+// TEMPORAL SCHEMES
 enum class TimeScheme
 {
-    LEAPFROG,  // Esplicito O(dt²), richiede CFL. Nessun solve lineare.
-    NEWMARK,   // Implicito Newmark-β, incondizionatamente stabile.
+    LEAPFROG,  // Explicit O(dt2), CFL. 
+    NEWMARK,   // ImplicitoNewmark-β, unconditionally stable.
 };
 
 // ============================================================
-//  Soluzione esatta MMS:  u = cos(πt)·sin(πx)·sin(πy)[·sin(πz)]
+//  Exact solution MMS:  u = cos(πt)·sin(πx)·sin(πy)[·sin(πz)]
 //  Forcing:  f = π²·(dim·c²−1)·cos(πt)·sin(πx)·sin(πy)[·sin(πz)]
 // ============================================================
 template <int dim>
@@ -194,34 +151,32 @@ private:
     double c;
 };
 
-// ============================================================
-//  Classe principale WaveEquation (MPI-parallel)
-// ============================================================
+
 template <int dim>
 class WaveEquation
 {
 public:
-    // ---- Parametri pubblici ----
-    double c             = 1.0;
+    
+    double c             = 1.0;     // public parameters 
     double damping       = 0.0;
     double time_step     = 1e-3;
     double end_time      = 1.0;
 
-    double newmark_beta  = 0.25;   // schema trapezoidale
-    double newmark_gamma = 0.50;
+    double newmark_beta  = 0.25;   // trapezoidal scheme (unconditionally stable, O(dt2))
+    double newmark_gamma = 0.50;   // 0.5 for no numerical damping, >0.5 for some damping
 
-    unsigned int initial_refinement   = 6;
-    unsigned int max_refinement_level = 8;
-    unsigned int fe_degree            = 1;
+    unsigned int initial_refinement   = 6;      // 8^6 = 262144 cells in 2D, 8^4 = 4096 cells in 3D
+    unsigned int max_refinement_level = 8;      // maximum AMR level (relative to initial_refinement)
+    unsigned int fe_degree            = 1;      // Q1 elements, can change to Q2 for more accuracy
 
     bool use_amr          = true;
     bool use_absorbing_bc = false;
     bool track_energy     = true;
 
-    SimulationMode mode        = SimulationMode::PEBBLE_IN_POND;
-    TimeScheme     time_scheme = TimeScheme::LEAPFROG;
+    SimulationMode mode        = SimulationMode::PEBBLE_IN_POND;          
+    TimeScheme     time_scheme = TimeScheme::LEAPFROG;              
 
-    // Rifrazione
+    // Rifraction parameters (only for mode == REFRACTION)
     double c_fast      = 2.0;
     double c_slow      = 0.8;
     double interface_y = 0.5;
@@ -233,26 +188,32 @@ public:
 
     unsigned int output_every_n_steps = 10;
 
-    // ---- Costruttore / Run ----
+    // Constructor/ run method
     WaveEquation(MPI_Comm mpi_communicator);
     ~WaveEquation() = default;
 
     void run();
     void run_convergence_study();
+    void prepare_for_analysis()         // useful for analysis of dispersion
+    {
+        make_grid();
+        setup_system();
+        assemble_matrices();
+    }
 
 private:
-    // ---- MPI ----
-    MPI_Comm           mpi_comm;      // comunicatore MPI
-    const unsigned int n_mpi_procs;   // numero totale di processi
-    const unsigned int this_mpi_proc; // rank del processo corrente
+    // MPI
+    MPI_Comm           mpi_comm;      // MPI communicator
+    const unsigned int n_mpi_procs;   // # of processes
+    const unsigned int this_mpi_proc; // rank of this process
 
-    // Stampa solo dal processo 0
+    // printing only on rank 0
     ConditionalOStream pcout;
 
-    // Timer per il profiling
+    // Timer fot profiling
     TimerOutput computing_timer;
 
-    // ---- Metodi privati ----
+    // PRIVATE METHODS
     void make_grid();
     void make_grid_with_obstacle();
     void setup_system();
@@ -264,36 +225,82 @@ private:
     void output_results(unsigned int step);
     void check_cfl_condition() const;
 
-    double compute_kinetic_energy()   const;
-    double compute_potential_energy() const;
+    double compute_kinetic_energy(); //  const;
+    double compute_potential_energy(); //const;
     std::pair<double, double> compute_errors(double t) const;
 
     double wave_speed_at(const Point<dim> &p) const;
 
-    // ---- Dati FEM (tutti distribuiti via MPI) ----
+    //NEWMR MATRIX AND PRECONDITIONER 
+    bool newmark_matrix_is_current = false;
+    TrilinosWrappers::PreconditionAMG newmark_preconditioner;
 
-    // Triangolazione distribuita (usa p4est internamente)
+    // Constructs A = M + β·dt²·K and initializes the AMG preconditioner.
+    // Called after assemble_matrices() and after refine_mesh() (mesh changed).
+    void build_newmark_system_matrix();
+
+
+    // Plane wave for dispersion analysis
+    struct DispersionResult
+    {
+        double k;              // Tested wave number
+        double kh;             // Dimensionless wave number
+        double c_numerical;    // Measured numerical phase velocity
+        double c_exact;        // Exact phase velocity (= c)
+        double relative_error; // (c_h - c) / c
+    };
+    // Launches the analysis for a list of wave numbers and Returns a table of results (one per wave number)
+    std::vector<DispersionResult> run_dispersion_analysis(
+        const std::vector<double> &wave_numbers);
+    // Measures the numerical ω for a single wave number k ia phase correlation <u_h(T), u_exact(T)>
+    double measure_numerical_phase_speed(double k, double n_periods);
+
+
+    // Struct to store benchmarking results
+    struct ScalingResult
+    {
+        unsigned int n_procs;
+        unsigned int n_dofs;
+        unsigned int n_cells;
+        double wall_time_total;    // Total elapsed time [s]
+        double wall_time_assembly; // Assembly time only [s]
+        double wall_time_solve;    // Solve time only [s]
+        double wall_time_output;   // Output/I/O time only [s]
+        double speedup;            // Speedup relative to 1 process
+        double efficiency;         // Speedup / n_procs
+    };
+
+    // Performs n_steps time steps and measures performance (disables disk output to focus on raw compute time)
+    ScalingResult run_scaling_benchmark(unsigned int n_steps);
+
+    // Prints and saves the formatted scaling table
+    void print_scaling_table(const std::vector<ScalingResult> &results,
+                             const std::string &label);
+
+    //FEM data structures
+
+
+    // Distributed triangulation and DoF handler
     parallel::distributed::Triangulation<dim> triangulation;
 
     std::unique_ptr<FE_Q<dim>> fe_ptr;
     DoFHandler<dim>            dof_handler;
 
-    // IndexSet: quali DoF appartengono a questo processo
+    // IndexSet: locally_owned_dofs (writing) e locally_relevant_dofs (reading)
     IndexSet locally_owned_dofs;
     IndexSet locally_relevant_dofs;  // owned + ghost
 
     AffineConstraints<double> constraints;
 
-    // Matrici Trilinos distribuite
+    // Distributed matrices (sparse, MPI-aware)
     TrilinosMatrix laplace_matrix;
     TrilinosMatrix boundary_mass_matrix;
     TrilinosMatrix system_matrix_newmark; // A = M + β·dt²·K (Newmark)
 
-    // Massa lumpata: ogni processo tiene solo la sua porzione
-    // Usiamo un TrilinosVector perché serve la comunicazione ghost
+    // MASS LUMPED We use a TrilinosVector because we need ghost communication
     TrilinosVector mass_matrix_diagonal;
 
-    // Vettori soluzione (con ghost per la lettura inter-processo)
+    // vector solution (with ghost values for reading)
     TrilinosVector solution_u;          // u^n  (locally relevant)
     TrilinosVector solution_u_old;      // u^{n-1}
     TrilinosVector solution_u_new;      // u^{n+1}
@@ -301,29 +308,55 @@ private:
     TrilinosVector acceleration_u;      // a^n (Newmark)
     TrilinosVector system_rhs;          // RHS (locally owned, no ghost)
 
-    // Vettori "owned only" per l'update (senza ghost, per la scrittura)
+    // "owned only" vectors for the update (no ghost, for writing)
     TrilinosVector owned_solution_u;
     TrilinosVector owned_solution_u_old;
     TrilinosVector owned_velocity_u;
     TrilinosVector owned_acceleration_u;
 
-    double       time;
-    unsigned int step_number;
+    double       time;             // current simulation time
+    unsigned int step_number;      // current time step number
 
-    // Log energia (solo rank 0 scrive)
+    // Log energy (only rank 0)
     std::ofstream energy_log;
 
     ConvergenceTable convergence_table;
 
     //Energy tracking
-    double energy_initial = 0.0;          // E0 al passo t=0
-    bool   energy_initialized = false;    // flag primo step
+    double energy_initial = 0.0;          // E0 at step t=0
+    bool   energy_initialized = false;    // flag for the first step
 
-    // Norma L∞ della soluzione (rileva blow-up numerici)
-    double compute_Linfty_norm() const;
+    // NormL∞ solution 
+    double compute_Linfty_norm(); //const;
 
-    // Scrive il report finale di energia su file
     void write_energy_report() const;
 };
 
-#endif // WAVE_EQUATION_H
+
+template <int dim>
+class PlaneWave : public Function<dim>
+{
+public:
+    PlaneWave(double wave_number, double wave_speed, double phase = 0.0)
+        : Function<dim>(1)
+        , k(wave_number)
+        , c(wave_speed)
+        , phi0(phase)
+    {}
+
+    double value(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        // Onda che si propaga nella direzione x
+        return std::sin(k * p[0] - c * k * this->get_time() + phi0);
+    }
+
+    // Velocità iniziale: u_t(x,0) = -c·k·cos(k·x + phi0)
+    double time_derivative_at_zero(const Point<dim> &p) const
+    {
+        return -c * k * std::cos(k * p[0] + phi0);
+    }
+
+private:
+    double k, c, phi0;
+};
+#endif 

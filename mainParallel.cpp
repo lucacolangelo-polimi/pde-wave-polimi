@@ -23,17 +23,16 @@ int main(int argc, char *argv[])
         wave.mode = SimulationMode::PEBBLE_IN_POND;
         wave.use_amr = false; // AMR off per benchmark puliti
 
-        // 3. Dispatcher basato sulla modalità
+        // Dispatcher basato sulla modalità
         if (mode_str == "strong" || mode_str == "weak")
         {
-            // Il benchmark chiama internamente il setup
-            wave.prepare_for_analysis();
+            wave.prepare_for_analysis(); 
             auto result = wave.run_scaling_benchmark(100);
-            wave.print_scaling_table({result}, mode_str == "strong" ? "Strong Scaling" : "Weak Scaling");
+            wave.print_scaling_table({result}, ...);
         }
         else if (mode_str == "dispersion")
         {
-            wave.prepare_for_analysis(); // Il metodo pubblico che abbiamo creato!
+            wave.prepare_for_analysis(); 
             const double h = 1.0 / std::pow(2.0, wave.initial_refinement);
             std::vector<double> kvals;
             for (int i = 1; i <= 8; ++i) kvals.push_back(M_PI * i / (8.0 * h));

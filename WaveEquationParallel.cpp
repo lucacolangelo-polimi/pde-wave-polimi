@@ -1,55 +1,5 @@
-// ============================================================
-// WaveEquation.cpp  —  implementazione MPI-parallela
-//
-// ARCHITETTURA MPI IN DEAL.II:
-// ─────────────────────────────────────────────────────────────
-// 1. parallel::distributed::Triangulation
-//    La mesh è partizionata automaticamente tra i processi MPI
-//    tramite p4est. Ogni processo conosce:
-//      - "locally owned cells": celle che elabora
-//      - "ghost cells": celle dei vicini, necessarie per assembly
-//
-// 2. IndexSet
-//    locally_owned_dofs  : DoF di proprietà di questo processo
-//    locally_relevant_dofs: owned + ghost (per leggere i valori
-//                           dei vicini durante assembly/solve)
-//
-// 3. TrilinosWrappers::MPI::Vector
-//    Vettori distribuiti. Esistono in due varianti:
-//      - "owned only" (no ghost): per scrivere (assembly RHS)
-//      - "with ghost"            : per leggere (assembly K, output)
-//    La sincronizzazione avviene con update_ghost_values() e
-//    compress(VectorOperation::add o ::insert).
-//
-// 4. TrilinosWrappers::SparseMatrix
-//    Matrice distribuita per righe. Ogni processo possiede le
-//    righe corrispondenti ai suoi locally_owned_dofs.
-//    L'assembly locale (celle owned+ghost) è thread-safe:
-//    Trilinos gestisce internamente la comunicazione off-process.
-//
-// 5. Schema Leapfrog (esplicito, no solve lineare):
-//    - assemble_rhs(): ogni processo calcola la sua porzione di RHS
-//    - compress(add): somma i contributi tra processi
-//    - divisione locale: a_i = rhs_i / M_ii  (solo owned dofs)
-//    - update Leapfrog: u_new = 2u - u_old + dt²·a
-//    - constraints.distribute(): sincronizza i DoF vincolati
-//
-// 6. Schema Newmark (implicito, solve CG con Trilinos):
-//    - Risolve (M + β·dt²·K)·a = RHS con SolverCG Trilinos
-//    - Il solver è già MPI-aware: comunicazione automatica
-//
-// 7. AMR parallelo:
-//    - parallel::distributed::GridRefinement
-//    - parallel::distributed::SolutionTransfer
-//    - Dopo refine, repartiziona automaticamente con p4est
-//
-// 8. Output parallelo:
-//    - Ogni processo scrive il suo file .vtu
-//    - Il rank 0 scrive il file .pvtu master (indice dei file)
-//    - ParaView carica il .pvtu e ricostruisce la soluzione
-// ============================================================
 
-#include "WaveEquation.hpp"
+#include "WaveEquationParallel.hpp"
 
 #include <deal.II/distributed/tria.h>
 #include <deal.II/distributed/solution_transfer.h>
@@ -61,35 +11,35 @@
 #include <deal.II/numerics/error_estimator.h>
 #include <deal.II/lac/sparsity_tools.h>
 #include <deal.II/lac/dynamic_sparsity_pattern.h>
+#include <chrono>
+#include <iomanip> 
 
 #include <iostream>
 #include <fstream>
 #include <map>
 #include <algorithm>
 
-// ============================================================
-// Costruttore
-// ============================================================
+//Constructor
 template <int dim>
 WaveEquation<dim>::WaveEquation(MPI_Comm mpi_communicator)
     : mpi_comm(mpi_communicator)
     , n_mpi_procs(Utilities::MPI::n_mpi_processes(mpi_comm))
     , this_mpi_proc(Utilities::MPI::this_mpi_process(mpi_comm))
-    , pcout(std::cout, this_mpi_proc == 0)   // stampa solo rank 0
+    , pcout(std::cout, this_mpi_proc == 0)   // print only on rank 0
     , computing_timer(mpi_comm,
                       pcout,
                       TimerOutput::never,
                       TimerOutput::wall_times)
-    , triangulation(mpi_comm)                // mesh distribuita p4est
+    , triangulation(mpi_comm)                // distributed mesh p4est
     , fe_ptr(std::make_unique<FE_Q<dim>>(1))
     , dof_handler(triangulation)
     , time(0.0)
     , step_number(0)
+    , newmark_matrix_is_current(false)
 {}
 
-// ============================================================
-// wave_speed_at: c(x) — costante o eterogeneo (rifrazione)
-// ============================================================
+/
+// wave_speed_at: c(x) — constant or eterogeneous (rifraction)
 template <int dim>
 double WaveEquation<dim>::wave_speed_at(const Point<dim> &p) const
 {
@@ -98,41 +48,38 @@ double WaveEquation<dim>::wave_speed_at(const Point<dim> &p) const
     return c;
 }
 
-// ============================================================
 // make_grid
-// ============================================================
 template <int dim>
 void WaveEquation<dim>::make_grid()
 {
     TimerOutput::Scope t(computing_timer, "make_grid");
 
-    pcout << "  Generazione griglia [0,1]^" << dim
-          << "  (raffinamenti globali: " << initial_refinement << ")\n";
+    pcout << "  Grid generation [0,1]^" << dim
+          << "  (global refinements: " << initial_refinement << ")\n";
 
     GridGenerator::hyper_cube(triangulation, 0.0, 1.0);
 
-    // refine_global su parallel::distributed::Triangulation
-    // redistribuisce automaticamente le celle tra i processi
+    // refine_global on parallel::distributed::Triangulation
+    //redistributes cells between processes
     triangulation.refine_global(initial_refinement);
 
-    pcout << "  Celle attive (globale): "
+    pcout << "  Active cells (global): "
           << triangulation.n_global_active_cells() << "\n";
 }
 
-// ============================================================
-// make_grid_with_obstacle  (diffrazione)
-// ============================================================
+
+// make_grid_with_obstacle  (DIFFRACTION)
 template <int dim>
 void WaveEquation<dim>::make_grid_with_obstacle()
 {
     TimerOutput::Scope t(computing_timer, "make_grid_obstacle");
 
-    pcout << "  Generazione griglia con ostacolo (diffrazione)...\n";
+    pcout << "  grid generation with obstacle (diffraction)...\n";
 
     GridGenerator::hyper_cube(triangulation, 0.0, 1.0);
     triangulation.refine_global(initial_refinement);
 
-    // Ogni processo marca solo le sue celle locali
+    // Each process only marks its local cells
     for (auto &cell : triangulation.active_cell_iterators())
     {
         if (!cell->is_locally_owned()) continue;
@@ -144,35 +91,33 @@ void WaveEquation<dim>::make_grid_with_obstacle()
             cell->set_material_id(1);
     }
 
-    pcout << "  Celle attive (globale): "
+    pcout << "  Active cells (global): "
           << triangulation.n_global_active_cells() << "\n";
 }
 
-// ============================================================
 // setup_system
-// ============================================================
 template <int dim>
 void WaveEquation<dim>::setup_system()
 {
     TimerOutput::Scope t(computing_timer, "setup_system");
 
-    pcout << "  Setup sistema...\n";
+    pcout << "  Setup system...\n";
 
-    // Ricrea FE con il grado scelto
+    // Recreate FE with the chosen grade
     fe_ptr = std::make_unique<FE_Q<dim>>(fe_degree);
     dof_handler.distribute_dofs(*fe_ptr);
 
-    // ---- IndexSet: DoF owned e relevant ----
-    // locally_owned_dofs: quelli che questo processo "possiede"
+    // IndexSet: DoF owned e relevant 
+    // locally_owned_dofs: those that this process "possesses"
     locally_owned_dofs    = dof_handler.locally_owned_dofs();
-    // locally_relevant_dofs: owned + ghost (i vicini che ci servono)
+    // locally_relevant_dofs: owned + ghost (neighboring DoF needed for assembly)
     locally_relevant_dofs = DoFTools::extract_locally_relevant_dofs(dof_handler);
 
-    pcout << "  DoF globali: " << dof_handler.n_dofs()
-          << "  (questo processo: " << locally_owned_dofs.n_elements() << ")\n";
+    pcout << "  DoF global: " << dof_handler.n_dofs()
+          << "  (this process: " << locally_owned_dofs.n_elements() << ")\n";
 
-    // ---- Constraints ----
-    // AffineConstraints usa locally_relevant_dofs come IndexSet
+    // CONSTRAINTS
+    // AffineConstraints uses locally_relevant_dofs such as IndexSet
     constraints.clear();
     constraints.reinit(locally_relevant_dofs);
 
@@ -180,14 +125,14 @@ void WaveEquation<dim>::setup_system()
 
     if (!use_absorbing_bc)
     {
-        // Dirichlet u=0 su tutto il bordo (boundary_id=0)
+        // Dirichlet u=0 on the boundary  (boundary_id=0)
         VectorTools::interpolate_boundary_values(
             dof_handler, 0,
             Functions::ZeroFunction<dim>(),
             constraints);
     }
 
-    // Ostacolo diffrazione: vincola i DoF delle celle con material_id=1
+    // Obstacle diffraction: binds the DoF of cells with material_id=1
     if (mode == SimulationMode::DIFFRACTION)
     {
         for (auto &cell : dof_handler.active_cell_iterators())
@@ -203,9 +148,8 @@ void WaveEquation<dim>::setup_system()
     }
     constraints.close();
 
-    // ---- Sparsity pattern distribuito ----
-    // DynamicSparsityPattern sui locally_relevant_dofs,
-    // poi lo distribuiamo ai processi remoti con SparsityTools
+    // Sparsity pattern distributed 
+    // DynamicSparsityPattern on locally_relevant_dofs, then We distribute it to remote processes with SparsityTools
     DynamicSparsityPattern dsp(locally_relevant_dofs);
     DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, false);
     SparsityTools::distribute_sparsity_pattern(
@@ -214,9 +158,9 @@ void WaveEquation<dim>::setup_system()
         mpi_comm,
         locally_relevant_dofs);
 
-    // ---- Alloca matrici Trilinos ----
-    // Ogni matrice è distribuita: processo i possiede le righe
-    // corrispondenti a locally_owned_dofs
+    // Trilinos MATRICES
+    // Each matrix is distributed: process i has the rows
+    // matching locally_owned_dofs
     laplace_matrix.reinit(locally_owned_dofs,
                           locally_owned_dofs,
                           dsp, mpi_comm);
@@ -229,8 +173,8 @@ void WaveEquation<dim>::setup_system()
                                      locally_owned_dofs,
                                      dsp, mpi_comm);
 
-    // ---- Alloca vettori ----
-    // "owned only" (no ghost): per assembly (scrittura)
+    // ALLOCATION VECTORSD
+    // "owned only" (no ghost): assembly (writings)
     mass_matrix_diagonal.reinit(locally_owned_dofs, mpi_comm);
     system_rhs.reinit(locally_owned_dofs, mpi_comm);
     owned_solution_u.reinit(locally_owned_dofs, mpi_comm);
@@ -238,7 +182,7 @@ void WaveEquation<dim>::setup_system()
     owned_velocity_u.reinit(locally_owned_dofs, mpi_comm);
     owned_acceleration_u.reinit(locally_owned_dofs, mpi_comm);
 
-    // "with ghost" (locally_relevant): per lettura durante assembly
+    // "with ghost" (locally_relevant): for writing during assembly
     solution_u.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
     solution_u_old.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
     solution_u_new.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
@@ -249,10 +193,9 @@ void WaveEquation<dim>::setup_system()
 // ============================================================
 // assemble_matrices
 //
-// Ogni processo itera solo sulle sue "locally owned cells".
-// I contributi vengono accumulati localmente e poi Trilinos
-// esegue la comunicazione con compress(VectorOperation::add).
-// ============================================================
+// Each process will only be on its "locally owned cells".
+// Contributions are accumulated locally and then Trilinos
+// performs communication with compresses(VectorOperation::add).
 template <int dim>
 void WaveEquation<dim>::assemble_matrices()
 {
@@ -284,7 +227,7 @@ void WaveEquation<dim>::assemble_matrices()
     Vector<double>     cell_M(dpc);
     std::vector<types::global_dof_index> local_idx(dpc);
 
-    // ---- Itera solo sulle celle locally owned ----
+    // Iterates only on the locally owned cells 
     for (const auto &cell : dof_handler.active_cell_iterators())
     {
         if (!cell->is_locally_owned()) continue;
@@ -295,7 +238,7 @@ void WaveEquation<dim>::assemble_matrices()
         cell_K = 0.0;
         cell_M = 0.0;
 
-        // Celle ostacolo: nessun contributo fisico
+        // Obstacle cells: no physical contribution, but we must still call distribute_local_to_global
         if (cell->material_id() == 1)
         {
             cell->get_dof_indices(local_idx);
@@ -303,7 +246,7 @@ void WaveEquation<dim>::assemble_matrices()
             continue;
         }
 
-        // Matrice di rigidezza K con c²(x) variabile
+        // matrix  K with c²(x) variable
         for (unsigned int q = 0; q < q_stiff.size(); ++q)
         {
             const double cq  = wave_speed_at(fev_stiff.quadrature_point(q));
@@ -316,7 +259,7 @@ void WaveEquation<dim>::assemble_matrices()
                                   * JxW;
         }
 
-        // Massa lumpata (Gauss-Lobatto)
+        // Mass lumped (Gauss-Lobatto)
         for (unsigned int q = 0; q < q_mass.size(); ++q)
         {
             const double JxW = fev_mass.JxW(q);
@@ -329,15 +272,15 @@ void WaveEquation<dim>::assemble_matrices()
 
         cell->get_dof_indices(local_idx);
 
-        // distribute_local_to_global gestisce sia la comunicazione
-        // inter-processo che l'applicazione dei constraints
+        // distribute_local_to_global menage both communication and constraints application
         constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
 
-        // Massa diagonale: sommiamo direttamente sul vettore globale
+        // Diagonal mass: we add directly to the global vector
         for (unsigned int i = 0; i < dpc; ++i)
             mass_matrix_diagonal(local_idx[i]) += cell_M(i);
 
-        // Matrice di bordo per ABC
+        // Matric for ABC (absorbing boundary conditions):
+        // matrix B = ∫_Γ φ_i φ_j ds 
         if (use_absorbing_bc)
         {
             for (const auto &face : cell->face_iterators())
@@ -360,44 +303,50 @@ void WaveEquation<dim>::assemble_matrices()
         }
     }
 
-    // ---- Comunicazione MPI: somma contributi di tutti i processi ----
-    // compress(add): ogni processo invia le sue righe "remote" agli altri
+    // MPI communication : somma contributi di tutti i processi , it adds ocontributions from remote processes to the local rows and makes the result available on all processes
+    // compress(add): every process send his "remote" rows to the others, and sums the contributions in the local rows
     laplace_matrix.compress(VectorOperation::add);
     mass_matrix_diagonal.compress(VectorOperation::add);
     if (use_absorbing_bc)
         boundary_mass_matrix.compress(VectorOperation::add);
 
-    // Controllo positività massa (su tutti i processi via MPI_Allreduce)
+    // mass positive check (global minimum via MPI_Allreduce)
     const double local_min = mass_matrix_diagonal.min();
     const double global_min = Utilities::MPI::min(local_min, mpi_comm);
     AssertThrow(global_min > 0.0,
-        ExcMessage("Massa lumpata: entry diagonale non positiva!"));
+        ExcMessage("Lumped mass matrix: entry diagonal non positive!"));
 
-    pcout << "  Assembly completato. min(M_diag)=" << global_min << "\n";
+    pcout << "  Assembly completed. min(M_diag)=" << global_min << "\n";
+
+
+    // FOR NEWMARK: build system matrix A = M + β·dt²·K
+    if (time_scheme == TimeScheme::NEWMARK)
+    {
+        newmark_matrix_is_current = false;  // forza la ricostruzione
+        build_newmark_system_matrix();
+    }
 }
 
 // ============================================================
 // assemble_rhs
 //
-// Calcola:  RHS = −K·u  +  F(t)  −  c·B·v  −  d·M·v
-//
-// Nota: laplace_matrix.vmult() e boundary_mass_matrix.vmult()
-// usano internamente MPI_Allreduce per sommare i contributi
-// dei processi ghost. Il risultato è già distribuito.
-// ============================================================
+// Calculate: RHS = −K·u + F(t) − c·B·v − d·M·v
+// Note: laplace_matrix.vmult() and boundary_mass_matrix.vmult()
+// use MPI_Allreduce internally to add up contributions
+// of ghost processes. The result is already distributed.
 template <int dim>
 void WaveEquation<dim>::assemble_rhs(double t)
 {
     system_rhs = 0.0;
 
-    // Aggiorna i ghost values di solution_u prima di vmult
+    // Update the ghost values of solution_u before vmult
     solution_u.update_ghost_values();
 
-    // −K·u  (K include già c²)
+    // −K·u  (K already includes c²)
     laplace_matrix.vmult(system_rhs, solution_u);
     system_rhs *= -1.0;
 
-    // Forcing term f(x,t) per MMS
+    // Forcing term f(x,t) for MMS
     if (mode == SimulationMode::MMS_CONVERGENCE)
     {
         QGauss<dim> q(fe_ptr->degree + 1);
@@ -423,7 +372,7 @@ void WaveEquation<dim>::assemble_rhs(double t)
                     cell_rhs(i) += fev.shape_value(i, q) * fval * fev.JxW(q);
             }
             cell->get_dof_indices(local_idx);
-            // add_local_to_global su vettore Trilinos
+            // add_local_to_global on Trilinos vector 
             constraints.distribute_local_to_global(cell_rhs, local_idx, system_rhs);
         }
         system_rhs.compress(VectorOperation::add);
@@ -438,7 +387,7 @@ void WaveEquation<dim>::assemble_rhs(double t)
         system_rhs.add(-c, abc_contrib);
     }
 
-    // Smorzamento: −d·M·v  (M diagonale, operazione locale)
+    // Damping: −d·M·v  (M diagonal, local operation)
     if (damping > 0.0)
     {
         velocity_u.update_ghost_values();
@@ -452,10 +401,9 @@ void WaveEquation<dim>::assemble_rhs(double t)
 // solve_time_step  —  Leapfrog esplicito
 //
 // u^{n+1} = 2·u^n − u^{n-1} + dt²·M^{-1}·RHS
-//
-// Con massa lumpata M^{-1} è divisione scalare locale:
-// nessuna comunicazione MPI per il solve.
-// La comunicazione avviene solo in assemble_rhs (vmult).
+// With lumpy mass M^{-1} is local scalar division:
+// no MPI communication for the solve.
+// Communication takes place only in assemble_rhs (vmult).
 // ============================================================
 template <int dim>
 void WaveEquation<dim>::solve_time_step()
@@ -464,11 +412,11 @@ void WaveEquation<dim>::solve_time_step()
 
     assemble_rhs(time);
 
-    // Aggiorna ghost per i vettori che leggiamo
+    // Update ghost values for the vectors we read
     solution_u.update_ghost_values();
     solution_u_old.update_ghost_values();
 
-    // a_i = rhs_i / M_ii  — operazione locale (solo owned dofs)
+    // a_i = rhs_i / M_ii  — local operation (only owned dofs)
     for (const auto idx : locally_owned_dofs)
     {
         const double m_ii = mass_matrix_diagonal(idx);
@@ -484,44 +432,41 @@ void WaveEquation<dim>::solve_time_step()
                               + dt2 * owned_acceleration_u(idx);
     }
 
-    // Applica constraints Dirichlet: operazione locale
+    //Apply Dirichlet constraints: local operation
     if (!use_absorbing_bc)
         constraints.distribute(owned_solution_u);
 
-    // Velocità centrata: v^n = (u^{n+1} − u^{n-1}) / (2·dt)
+    // Centered speed: v^n = (u^{n+1} − u^{n-1}) / (2·dt)
     for (const auto idx : locally_owned_dofs)
         owned_velocity_u(idx) = (owned_solution_u(idx) - solution_u_old(idx))
                               / (2.0 * time_step);
 
-    // ---- Shift: avanza di un passo ----
-    // Copia owned → ghost (update_ghost_values propaga ai vicini)
+    // Shift: advances one step 
+    // Copy owned → ghost (update_ghost_values propagates to neighbors)
     owned_solution_u_old = owned_solution_u;
 
-    solution_u_old = solution_u;    // u^{n-1} <- u^n
+    solution_u_old = solution_u;        // u^{n-1} <- u^n
     solution_u     = owned_solution_u;  // u^n <- u^{n+1}
     velocity_u     = owned_velocity_u;
 
-    // Rende i nuovi ghost values disponibili per il prossimo step
+    //Makes new ghost values available for the next step
     solution_u.update_ghost_values();
     solution_u_old.update_ghost_values();
     velocity_u.update_ghost_values();
 }
 
-// ============================================================
-// solve_time_step_newmark  —  schema Newmark-β implicito
-//
-// Risolve con SolverCG (Trilinos):
-//   A·a^{n+1} = RHS_newmark
-//   A = M_lumped + β·dt²·K
-//
-// Il solver CG di Trilinos è MPI-aware: le operazioni
-// dot-product e axpy sono automaticamente ridotte su tutti
-// i processi tramite MPI_Allreduce internamente.
-// ============================================================
+// ------------------------------------------------------------
+// solve_time_step_newmark OTTIMIZZATO
+// uses AMG rather than SSOR (convergence in O(1) iterations)
 template <int dim>
 void WaveEquation<dim>::solve_time_step_newmark()
 {
-    TimerOutput::Scope t(computing_timer, "solve_newmark");
+    TimerOutput::Scope timer(computing_timer, "solve_newmark");
+
+    // Security check: the matrix must be updated
+    AssertThrow(newmark_matrix_is_current,
+        ExcMessage("build_newmark_system_matrix() not called! "
+                   "Call assemble_matrices() before the time loop."));
 
     const double dt  = time_step;
     const double b   = newmark_beta;
@@ -531,7 +476,7 @@ void WaveEquation<dim>::solve_time_step_newmark()
     velocity_u.update_ghost_values();
     acceleration_u.update_ghost_values();
 
-    // ---- Predittori ----
+    // predictors u_pred, v_pred (owned only, no ghost)
     TrilinosVector u_pred(locally_owned_dofs, mpi_comm);
     TrilinosVector v_pred(locally_owned_dofs, mpi_comm);
     for (const auto idx : locally_owned_dofs)
@@ -544,47 +489,44 @@ void WaveEquation<dim>::solve_time_step_newmark()
     }
     u_pred.compress(VectorOperation::insert);
 
-    // ---- RHS_newmark = −K·u_pred ----
-    TrilinosVector u_pred_ghosted(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
-    u_pred_ghosted = u_pred;
-    u_pred_ghosted.update_ghost_values();
+    // RHS_newmark = −K·u_pred 
+    TrilinosVector u_pred_g(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    u_pred_g = u_pred;
+    u_pred_g.update_ghost_values();
 
     TrilinosVector rhs_newmark(locally_owned_dofs, mpi_comm);
-    laplace_matrix.vmult(rhs_newmark, u_pred_ghosted);
+    laplace_matrix.vmult(rhs_newmark, u_pred_g);
     rhs_newmark *= -1.0;
 
-    // ---- Matrice di sistema A = M_diag + β·dt²·K ----
-    // Ricalcoliamo A solo se necessario (primo step o dopo AMR)
-    // Per semplicità la costruiamo a ogni step (overhead accettabile
-    // se il numero di step è grande rispetto ai DoF).
-    system_matrix_newmark.copy_from(laplace_matrix);
-    system_matrix_newmark *= b * dt * dt;
-    // Aggiunge M sulla diagonale: A_ii += M_ii
-    for (const auto idx : locally_owned_dofs)
-        system_matrix_newmark.add(idx, idx, mass_matrix_diagonal(idx));
-    system_matrix_newmark.compress(VectorOperation::add);
-
-    // ---- Solve CG con precondizionatore Trilinos SSOR ----
+    //  Solve CG wuth AMG  preconditioner
+    // system_matrix_newmark it's already built and the AMG preconditioner is initialized, so no overhead in the time loop
     TrilinosVector a_new(locally_owned_dofs, mpi_comm);
-    SolverControl solver_control(2000, 1e-10 * rhs_newmark.l2_norm() + 1e-30);
-    TrilinosWrappers::SolverCG solver(solver_control);
-    TrilinosWrappers::PreconditionSSOR preconditioner;
-    preconditioner.initialize(system_matrix_newmark);
-    solver.solve(system_matrix_newmark, a_new, rhs_newmark, preconditioner);
+
+    SolverControl solver_control(500, 1e-10 * rhs_newmark.l2_norm() + 1e-30);
+    TrilinosWrappers::SolverCG cg_solver(solver_control);
+
+    // Uses the preconditioner that is already initialized — no overhead
+    cg_solver.solve(system_matrix_newmark,
+                    a_new,
+                    rhs_newmark,
+                    newmark_preconditioner);
+
     constraints.distribute(a_new);
 
-    pcout << "    Newmark CG: " << solver_control.last_step() << " iterazioni\n";
+    // Log iterations only every output_every_n_steps per not "fill" stdout
+    if (step_number % output_every_n_steps == 0)
+        pcout << "    Newmark CG: " << solver_control.last_step()
+              << " iterazioni (AMG)\n";
 
-    // ---- Correttori ----
+    // CORRECTORS
     for (const auto idx : locally_owned_dofs)
     {
-        owned_solution_u(idx) = u_pred(idx) + b * dt * dt * a_new(idx);
-        owned_velocity_u(idx) = v_pred(idx) + gam * dt * a_new(idx);
+        owned_solution_u(idx)    = u_pred(idx) + b * dt * dt * a_new(idx);
+        owned_velocity_u(idx)    = v_pred(idx) + gam * dt * a_new(idx);
         owned_acceleration_u(idx) = a_new(idx);
     }
     constraints.distribute(owned_solution_u);
 
-    // Shift
     solution_u_old = solution_u;
     solution_u     = owned_solution_u;
     velocity_u     = owned_velocity_u;
@@ -598,13 +540,11 @@ void WaveEquation<dim>::solve_time_step_newmark()
 
 // ============================================================
 // compute_kinetic_energy
-//
 // E_k = 0.5 · v^T · M · v
-// Con M diagonale e v distribuito, ogni processo calcola
-// la somma locale, poi MPI_Allreduce somma globalmente.
-// ============================================================
+// With diagonal M and v distributed, each process calculates
+// the local sum, then MPI_Allreduce sum globally.
 template <int dim>
-double WaveEquation<dim>::compute_kinetic_energy() const
+double WaveEquation<dim>::compute_kinetic_energy() //const
 {
     double local_ek = 0.0;
     for (const auto idx : locally_owned_dofs)
@@ -619,13 +559,12 @@ double WaveEquation<dim>::compute_kinetic_energy() const
 // compute_potential_energy
 //
 // E_p = 0.5 · u^T · K · u
-// laplace_matrix.vmult() già distribuito.
-// ============================================================
+// laplace_matrix.vmult() already distrubuted
 template <int dim>
-double WaveEquation<dim>::compute_potential_energy() const
+double WaveEquation<dim>::compute_potential_energy() //const
 {
     TrilinosVector Ku(locally_owned_dofs, mpi_comm);
-    solution_u.update_ghost_values();  // const_cast non necessario: già chiamato
+    solution_u.update_ghost_values(); 
     laplace_matrix.vmult(Ku, solution_u);
 
     double local_ep = 0.0;
@@ -637,11 +576,10 @@ double WaveEquation<dim>::compute_potential_energy() const
 
 // ============================================================
 // compute_Linfty_norm
-// Calcola max|u_i| sui DoF locally owned, poi MPI_Allreduce.
-// Utile per rilevare instabilità numerica (CFL violata).
-// ============================================================
+// Calculate max|u_i| on locally owned DoF, then MPI_Allreduce.
+// Useful for detecting numerical instability (violated CFL).
 template <int dim>
-double WaveEquation<dim>::compute_Linfty_norm() const
+double WaveEquation<dim>::compute_Linfty_norm()  //const
 {
     double local_max = 0.0;
     for (const auto idx : locally_owned_dofs)
@@ -652,9 +590,8 @@ double WaveEquation<dim>::compute_Linfty_norm() const
 
 // ============================================================
 // compute_errors (MMS)
-// VectorTools::integrate_difference è già parallelo:
-// calcola l'errore locale e poi MPI_Allreduce.
-// ============================================================
+// VectorTools::integrate_difference already parallel:
+// calculates the local error and then MPI_Allreduce
 template <int dim>
 std::pair<double, double> WaveEquation<dim>::compute_errors(double t) const
 {
@@ -682,14 +619,13 @@ std::pair<double, double> WaveEquation<dim>::compute_errors(double t) const
 
 // ============================================================
 // check_cfl_condition
-// h_min è calcolato localmente, poi MPI_Allreduce prende il min globale.
-// ============================================================
+// h_min is calculated locally, then MPI_Allreduce takes the global min.
 template <int dim>
 void WaveEquation<dim>::check_cfl_condition() const
 {
     if (time_scheme == TimeScheme::NEWMARK)
     {
-        pcout << "  Schema Newmark-β: incondizionatamente stabile.\n";
+        pcout << "  Newmark-β scheme:unconditionally stable.\n";
         return;
     }
 
@@ -698,7 +634,7 @@ void WaveEquation<dim>::check_cfl_condition() const
         if (cell->is_locally_owned())
             local_h_min = std::min(local_h_min, cell->minimum_vertex_distance());
 
-    // MPI_Allreduce: prende il minimo globale
+    // MPI_Allreduce: takes the global minimum
     const double h_min  = Utilities::MPI::min(local_h_min, mpi_comm);
     const double c_max  = (mode == SimulationMode::REFRACTION)
                            ? std::max(c_fast, c_slow) : c;
@@ -710,23 +646,19 @@ void WaveEquation<dim>::check_cfl_condition() const
           << "  c_max=" << c_max
           << "  CFL=" << cfl_num;
     if (cfl_num > 1.0)
-        pcout << "  *** ATTENZIONE: CFL VIOLATA! ***";
+        pcout << "  *** WARNING: CFL VIOLATED! ***";
     else
         pcout << "  [OK]";
     pcout << "\n";
 }
 
-// ============================================================
-// output_results  —  output VTU parallelo
+//============================================================
+// output_results — parallel VTU output
 //
-// Strategia deal.II MPI:
-//   - Ogni processo scrive il suo file  solution-NNNN-RRRR.vtu
-//     dove RRRR = rank MPI
-//   - Il processo 0 scrive il file master  solution-NNNN.pvtu
-//     che contiene la lista di tutti i file .vtu
-//   - ParaView carica il .pvtu e ricostruisce automaticamente
-//     la soluzione completa
-// ============================================================
+// Strategy deal.II MPI:
+// - Each process writes its own solution-NNNN-RRRR.vtu file  where RRRR = MPI rank
+// - Process 0 writes the master file solution-NNNN.pvtu  which contains the list of all .vtu files
+// - ParaView loads the .pvtu and rebuilds automatically the complete solution
 template <int dim>
 void WaveEquation<dim>::output_results(unsigned int step)
 {
@@ -735,26 +667,26 @@ void WaveEquation<dim>::output_results(unsigned int step)
     DataOut<dim> data_out;
     data_out.attach_dof_handler(dof_handler);
 
-    // I vettori "with ghost" sono già sincronizzati
+    // "with ghost" vectors already sinchronized
     data_out.add_data_vector(solution_u, "displacement");
     data_out.add_data_vector(velocity_u, "velocity");
 
-    // Aggiunge il rank MPI come campo (utile per verificare il partizionamento)
+    // Adds the MPI rank as a field (useful for verifying partitioning)
     Vector<float> proc_id(triangulation.n_active_cells());
     proc_id = static_cast<float>(this_mpi_proc);
     data_out.add_data_vector(proc_id, "mpi_rank");
 
     data_out.build_patches();
 
-    // Nome base del file
+    // file name base: solution-NNNN where NNNN is the time step number
     const std::string base = "solution-" + Utilities::int_to_string(step, 4);
 
-    // Ogni processo scrive il suo pezzo
+    // for every process writes its own .vtu file with the local solution
     std::ofstream local_out(base + "-" +
         Utilities::int_to_string(this_mpi_proc, 4) + ".vtu");
     data_out.write_vtu(local_out);
 
-    // Solo il rank 0 scrive il file .pvtu master
+    // Only rank 0 writes the .pvtu master file
     if (this_mpi_proc == 0)
     {
         std::vector<std::string> file_list;
@@ -769,9 +701,8 @@ void WaveEquation<dim>::output_results(unsigned int step)
 
 // ============================================================
 // write_energy_report
-// Chiamata alla fine di run() — stampa statistiche globali
-// su stdout (solo rank 0) e scrive energy_report.txt
-// ============================================================
+// Call at the end of run() — print global statistics
+// on stdout (only rank 0) and writes energy_report.txt
 template <int dim>
 void WaveEquation<dim>::write_energy_report() const
 {
@@ -801,14 +732,10 @@ void WaveEquation<dim>::write_energy_report() const
     pcout << "\n  [Energy report salvato in energy_report.txt]\n";
 }
 
-// ============================================================
-// refine_mesh  —  AMR parallelo con p4est
-//
-// parallel::distributed::GridRefinement distribuisce i flag
-// tra i processi e p4est gestisce il ribilanciamento del carico.
-// parallel::distributed::SolutionTransfer trasferisce la
-// soluzione sulla nuova mesh distribuita.
-// ============================================================
+//========================================================
+// refine_mesh — parallel AMR with p4est
+// parallel::distributed::GridRefinement distributes flags  between processes and p4est manages load rebalancing.
+// parallel::distributed::SolutionTransfer transfers the solution on the new distributed mesh.
 template <int dim>
 void WaveEquation<dim>::refine_mesh()
 {
@@ -816,7 +743,7 @@ void WaveEquation<dim>::refine_mesh()
 
     pcout << "  AMR parallelo...\n";
 
-    // Stima errore locale (solo celle locally owned)
+    // Estimate local error (only locally owned cells)
     Vector<float> err(triangulation.n_active_cells());
     KellyErrorEstimator<dim>::estimate(
         dof_handler,
@@ -824,13 +751,13 @@ void WaveEquation<dim>::refine_mesh()
         std::map<types::boundary_id, const Function<dim> *>(),
         solution_u, err);
 
-    // parallel::distributed::GridRefinement: coordina i flag tra processi
+    // parallel::distributed::GridRefinement: coordinates the flags between processes
     parallel::distributed::GridRefinement
         ::refine_and_coarsen_fixed_fraction(
             triangulation, err,
             amr_refine_fraction, amr_coarsen_fraction);
 
-    // Limita il livello massimo
+    // Limit the maximum level
     for (auto &cell : triangulation.active_cell_iterators())
         if (cell->is_locally_owned() &&
             cell->level() >= static_cast<int>(max_refinement_level))
@@ -838,10 +765,10 @@ void WaveEquation<dim>::refine_mesh()
 
     triangulation.prepare_coarsening_and_refinement();
 
-    // ---- SolutionTransfer distribuito ----
-    // Nota: parallel::distributed::SolutionTransfer vuole
-    // un solo vettore per chiamata. Utilizziamo tre trasferimenti
-    // separati oppure un vettore concatenato (usiamo tre chiamate).
+    // SolutionTransfer distrributed
+    // Note: parallel::distributed::SolutionTransfer wants
+    // only one vector per call. We use three transfers
+    // separated or a chained vector (we use three calls).
     parallel::distributed::SolutionTransfer<dim, TrilinosVector>
         st_u(dof_handler), st_u_old(dof_handler), st_v(dof_handler);
 
@@ -855,7 +782,7 @@ void WaveEquation<dim>::refine_mesh()
 
     triangulation.execute_coarsening_and_refinement();
 
-    // Ridistribuisce DoF sulla nuova mesh
+    // Redistributes DoF on new mesh
     dof_handler.distribute_dofs(*fe_ptr);
     locally_owned_dofs    = dof_handler.locally_owned_dofs();
     locally_relevant_dofs = DoFTools::extract_locally_relevant_dofs(dof_handler);
@@ -863,7 +790,7 @@ void WaveEquation<dim>::refine_mesh()
     pcout << "  AMR: DoF globali=" << dof_handler.n_dofs()
           << "  celle=" << triangulation.n_global_active_cells() << "\n";
 
-    // Ricostruisce constraints
+    // Rebuilds constraints
     constraints.clear();
     constraints.reinit(locally_relevant_dofs);
     DoFTools::make_hanging_node_constraints(dof_handler, constraints);
@@ -872,7 +799,7 @@ void WaveEquation<dim>::refine_mesh()
             dof_handler, 0, Functions::ZeroFunction<dim>(), constraints);
     constraints.close();
 
-    // Ricostruisce sparsity e matrici
+    // Rebuilds sparsity and matrices
     DynamicSparsityPattern dsp(locally_relevant_dofs);
     DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, false);
     SparsityTools::distribute_sparsity_pattern(
@@ -884,7 +811,7 @@ void WaveEquation<dim>::refine_mesh()
     if (time_scheme == TimeScheme::NEWMARK)
         system_matrix_newmark.reinit(locally_owned_dofs, locally_owned_dofs, dsp, mpi_comm);
 
-    // Realloca vettori sulla nuova partizione
+    // Riallocation(?) vectors on the new partition
     mass_matrix_diagonal.reinit(locally_owned_dofs, mpi_comm);
     system_rhs.reinit(locally_owned_dofs, mpi_comm);
     owned_solution_u.reinit(locally_owned_dofs, mpi_comm);
@@ -898,7 +825,7 @@ void WaveEquation<dim>::refine_mesh()
     velocity_u.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
     acceleration_u.reinit(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
 
-    // Interpola le soluzioni sulla nuova mesh
+    // Interpolates the solutions on the new mesh
     TrilinosVector interp_u(locally_owned_dofs, mpi_comm);
     TrilinosVector interp_u_old(locally_owned_dofs, mpi_comm);
     TrilinosVector interp_v(locally_owned_dofs, mpi_comm);
@@ -918,17 +845,19 @@ void WaveEquation<dim>::refine_mesh()
     solution_u_old.update_ghost_values();
     velocity_u.update_ghost_values();
 
-    // Riassembla matrici sulla nuova mesh
+    // Riassemly matrices on a new mesh
     assemble_matrices();
     check_cfl_condition();
 }
 
 // ============================================================
-// run  —  loop temporale principale
-// ============================================================
+// run  —  main time loop
 template <int dim>
 void WaveEquation<dim>::run()
 {
+    // I 
+    energy_initialized = false;
+    energy_initial     = 0.0;
     pcout << "\n=======================================\n"
           << "  WaveEquation<" << dim << ">  MPI  "
           << n_mpi_procs << " processi\n  Modo: ";
@@ -948,7 +877,7 @@ void WaveEquation<dim>::run()
           << "  c=" << c << "  dt=" << time_step << "  T=" << end_time << "\n"
           << "=======================================\n";
 
-    // 1. Griglia e sistema
+    //grid and system setup
     if (mode == SimulationMode::DIFFRACTION)
         make_grid_with_obstacle();
     else
@@ -958,19 +887,19 @@ void WaveEquation<dim>::run()
     assemble_matrices();
     check_cfl_condition();
 
-    // 2. Log energia (solo rank 0)
+    //Energy log (only rank 0)
     if (track_energy && this_mpi_proc == 0)
     {
         energy_log.open("energy_log.csv");
         energy_log << "step,time,kinetic,potential,total,drift_rel,Linfty\n";
     }
 
-    // 3. Condizioni iniziali
+    // Initial conditions
     pcout << "  Condizioni iniziali...\n";
 
     if (mode == SimulationMode::MMS_CONVERGENCE)
     {
-        // IC da soluzione esatta
+        // IC from exact solution: u(x,0) = u0(x)  v(x,0) = u1(x)
         InitialDisplacementMMS<dim> u0;
         InitialVelocityMMS<dim>     u1;
 
@@ -979,7 +908,7 @@ void WaveEquation<dim>::run()
         solution_u = owned_solution_u;
 
         VectorTools::interpolate(dof_handler, u1, owned_velocity_u);
-        // u_old = u - dt*v  (encoda velocità iniziale nel Leapfrog)
+        // u_old = u - dt*v 
         for (const auto idx : locally_owned_dofs)
             owned_solution_u_old(idx) = owned_solution_u(idx)
                                       - time_step * owned_velocity_u(idx);
@@ -988,13 +917,12 @@ void WaveEquation<dim>::run()
     }
     else if (mode == SimulationMode::INTERFERENCE)
     {
-        // Due sorgenti gaussiane
+        // two gaussian wave packets centered at s1 and s2 (interference pattern)
         const double amp   = 1.0;
         const double width = 0.05;
         const Point<dim> s1(0.3, 0.5), s2(0.7, 0.5);
 
-        // Usiamo interpolate con una funzione lambda tramite FunctionFromFunctionObjects
-        // (più semplice: scorriamo i support points locali)
+        // We use interpolated with a lambda function via FunctionFromFunctionObjects (easier: we scroll through local support points)
         std::vector<Point<dim>> sp(dof_handler.n_dofs());
         MappingQ1<dim> mapping;
         DoFTools::map_dofs_to_support_points(mapping, dof_handler, sp);
@@ -1014,7 +942,7 @@ void WaveEquation<dim>::run()
     }
     else
     {
-        // Gaussiana singola centrata a sx (funziona per tutti gli altri modi)
+        // single gaussian wave packet centered at s1 (pebble in pond)
         std::vector<Point<dim>> sp(dof_handler.n_dofs());
         MappingQ1<dim> mapping;
         DoFTools::map_dofs_to_support_points(mapping, dof_handler, sp);
@@ -1043,12 +971,12 @@ void WaveEquation<dim>::run()
 
     output_results(0);
 
-    // Lista .pvtu per il file .pvd master (solo rank 0)
+    // .pvtu list for .pvd master (only rank 0)
     std::vector<std::pair<double, std::string>> pvd_list;
     if (this_mpi_proc == 0)
         pvd_list.push_back({0.0, "solution-0000.pvtu"});
 
-    // 4. Loop temporale
+    // time loop
     time        = 0.0;
     step_number = 0;
 
@@ -1057,18 +985,18 @@ void WaveEquation<dim>::run()
         step_number++;
         time += time_step;
 
-        // AMR parallelo (non per MMS)
+        // AMR parallel (not for MMS)
         if (use_amr && mode != SimulationMode::MMS_CONVERGENCE
                     && step_number % amr_every_n_steps == 0)
             refine_mesh();
 
-        // Avanzamento temporale
+        // Advance one time step
         if (time_scheme == TimeScheme::LEAPFROG)
             solve_time_step();
         else
             solve_time_step_newmark();
 
-        // Output e statistiche
+        // Output 
         if (step_number % output_every_n_steps == 0)
         {
             pcout << "  Step " << step_number << "  t=" << time;
@@ -1080,14 +1008,14 @@ void WaveEquation<dim>::run()
                 const double Etot  = Ek + Ep;
                 const double Linf  = compute_Linfty_norm();
 
-                // Inizializza E0 al primo step di output
+                // Initialized E0 at first output step (after ICs) to avoid startup transients
                 if (!energy_initialized)
                 {
                     energy_initial     = Etot;
                     energy_initialized = true;
                 }
 
-                // Drift relativo: misura la conservazione dell'energia
+                // Relative drift: measures energy conservation
                 const double drift = (energy_initial > 1e-30)
                                      ? std::abs(Etot - energy_initial) / energy_initial
                                      : 0.0;
@@ -1107,10 +1035,9 @@ void WaveEquation<dim>::run()
                                << drift      << ","
                                << Linf       << "\n";
 
-                // Rilevamento blow-up: se |u|_inf > 100 * ampiezza iniziale
-                // la simulazione è probabilmente instabile (CFL violata)
+                // Blow-up detection: whether |u|_inf > 100 * initial amplitude the simulation is probably unstable (CFL violated)
                 if (Linf > 100.0)
-                    pcout << "\n  *** ATTENZIONE: possibile blow-up numerico! "
+                    pcout << "\n  *** WARNING: numeric blow-up! "
                              "Riduci dt o verifica CFL. ***\n";
             }
 
@@ -1140,18 +1067,17 @@ void WaveEquation<dim>::run()
         write_energy_report(); 
     }
 
-    pcout << "  Simulazione completata. Steps: " << step_number << "\n";
+    pcout << "  Simulation completed. Steps: " << step_number << "\n";
     computing_timer.print_summary();
 }
 
 // ============================================================
-// run_convergence_study  —  MMS su livelli di raffinamento
-// ============================================================
+// run_convergence_study  —  MMS on refining levels
 template <int dim>
 void WaveEquation<dim>::run_convergence_study()
 {
-    pcout << "\n=== Studio di Convergenza MMS ("
-          << n_mpi_procs << " processi MPI, Q"
+    pcout << "\n=== Convergence Study MMS ("
+          << n_mpi_procs << " MPI processes, Q"
           << fe_degree << ", "
           << (time_scheme == TimeScheme::LEAPFROG ? "Leapfrog" : "Newmark-β")
           << ") ===\n";
@@ -1164,7 +1090,8 @@ void WaveEquation<dim>::run_convergence_study()
 
     for (unsigned int ref : levels)
     {
-        pcout << "\n--- Livello " << ref << " ---\n";
+        newmark_matrix_is_current = false;
+        pcout << "\n--- Level " << ref << " ---\n";
 
         triangulation.clear();
         initial_refinement = ref;
@@ -1203,7 +1130,7 @@ void WaveEquation<dim>::run_convergence_study()
         solution_u_old.update_ghost_values();
         velocity_u.update_ghost_values();
 
-        // Loop senza output
+        // Loop without output
         time = 0.0; step_number = 0;
         while (step_number < n_steps)
         {
@@ -1218,8 +1145,8 @@ void WaveEquation<dim>::run_convergence_study()
         auto [L2, H1] = compute_errors(time);
         pcout << "  L2=" << L2 << "  H1=" << H1 << "\n";
 
-        convergence_table.add_value("Livello", ref);
-        convergence_table.add_value("Celle",   (unsigned int)triangulation.n_global_active_cells());
+        convergence_table.add_value("Level", ref);
+        convergence_table.add_value("Cells",   (unsigned int)triangulation.n_global_active_cells());
         convergence_table.add_value("DoF",     dof_handler.n_dofs());
         convergence_table.add_value("h",       h);
         convergence_table.add_value("L2",      L2);
@@ -1237,21 +1164,366 @@ void WaveEquation<dim>::run_convergence_study()
     convergence_table.evaluate_convergence_rates(
         "H1", ConvergenceTable::reduction_rate_log2);
 
-    // Solo rank 0 stampa e salva la tabella
+    // Only rank 0 prints the table and saves it in convergence_table.txt
     if (this_mpi_proc == 0)
     {
-        pcout << "\n=== Tabella di Convergenza ===\n";
+        pcout << "\n=== Convergence Table ===\n";
         convergence_table.write_text(std::cout);
         std::ofstream f("convergence_table.txt");
         convergence_table.write_text(f);
-        pcout << "Tabella salvata in convergence_table.txt\n";
+        pcout << "Table saved in convergence_table.txt\n";
     }
 
     computing_timer.print_summary();
 }
 
+
+
+//------------------------------------------------------------------------------------
+// measure_numerical_phase_speed
+//
+// Launch a short simulation (n_wave cycle periods) with IC = flat wave sin(k·x).
+// Measures the accumulated phase shift by comparing u_h(T) with  the shifted flat wave of various phase values, finding the maximum correlation (phase matching).
+// Return c_h = ω_h / k (numeric phase speed).
+template <int dim>
+double WaveEquation<dim>::measure_numerical_phase_speed(
+    double k,
+    double n_periods)
+{
+    // Saves the current state (restored at the end)
+    // Note: This method does NOT change the permanent status of the class, We use local copies of vectors for dispersion simulation.
+
+    const double omega_exact = c * k;           // ω exact from dispersion relation of continuous wave equation
+    const double T_period    = 2.0 * M_PI / omega_exact; // period
+    const double T_sim       = n_periods * T_period;
+
+    // dt for dispersion simulation: CFL with margin
+    const double h_local = 1.0 / std::pow(2.0, initial_refinement);
+    const double dt_disp = 0.4 * h_local / c;
+    const unsigned int n_steps = static_cast<unsigned int>(T_sim / dt_disp) + 1;
+
+    // Local vectors for dispersion simulation
+    TrilinosVector d_u(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    TrilinosVector d_u_old(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    //TrilinosVector d_u_new(locally_owned_dofs, locally_relevant_dofs, mpi_comm);      --> non li usiamo alla fine 
+    //TrilinosVector d_vel(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    TrilinosVector d_rhs(locally_owned_dofs, mpi_comm);
+
+    //INITIAL CONDITIONS: palne wave sin(k·x)   
+    PlaneWave<dim> pw(k, c, 0.0);
+    pw.set_time(0.0);
+
+    {
+        TrilinosVector tmp(locally_owned_dofs, mpi_comm);
+        VectorTools::interpolate(dof_handler, pw, tmp);
+        constraints.distribute(tmp);
+        d_u = tmp;
+        d_u_old = d_u;
+        //d_vel   = 0.0; !!!!!!
+    }
+    d_u.update_ghost_values();
+    d_u_old.update_ghost_values();
+
+    // Mini loop Leapfrog 
+    for (unsigned int s = 0; s < n_steps; ++s)
+    {
+        d_rhs = 0.0;
+
+        // RHS = -K·u
+        laplace_matrix.vmult(d_rhs, d_u);
+        d_rhs *= -1.0;
+
+        // a = M^{-1} · RHS
+        TrilinosVector d_acc(locally_owned_dofs, mpi_comm);
+        for (const auto idx : locally_owned_dofs)
+            d_acc(idx) = d_rhs(idx) / mass_matrix_diagonal(idx);
+
+        // u_new = 2u - u_old + dt²·a
+        TrilinosVector d_owned_new(locally_owned_dofs, mpi_comm);
+        for (const auto idx : locally_owned_dofs)
+            d_owned_new(idx) = 2.0 * d_u(idx)
+                             - d_u_old(idx)
+                             + dt_disp * dt_disp * d_acc(idx);
+
+        constraints.distribute(d_owned_new);
+        d_u_old = d_u;
+        d_u     = d_owned_new;
+        d_u.update_ghost_values();
+        d_u_old.update_ghost_values();
+    }
+
+    //  Measurement of phase velocity by correlation 
+    // We look for the value of φ in [0, 2π] that maximizes  C(φ) = <u_h(T), sin(k·x - ω_exact·T + φ)>
+    // The φ optimal is the phase shift accumulated by the numerical solution.
+    // The numerical phase speed is:
+    // c_h = c · (1 - φ / (ω_exact · T_sim))
+    //     = c · (1 - phase-out_per_cycle / (2π))
+
+    const int n_phi = 360;  // Angular resolution: 1 degree
+    double best_corr = -2.0;
+    double best_phi  = 0.0;
+
+    for (int ip = 0; ip < n_phi; ++ip)
+    {
+        const double phi = 2.0 * M_PI * ip / n_phi;
+
+        PlaneWave<dim> ref(k, c, phi);
+        ref.set_time(T_sim);
+
+        // Calculate local correlation <u_h, ref>
+        // by numerical integration to the nodes (lumbusted mass)
+        TrilinosVector ref_vec(locally_owned_dofs, mpi_comm);
+        VectorTools::interpolate(dof_handler, ref, ref_vec);
+
+        double local_corr = 0.0;
+        double local_norm_h = 0.0, local_norm_r = 0.0;
+        for (const auto idx : locally_owned_dofs)
+        {
+            local_corr   += mass_matrix_diagonal(idx) * d_u(idx) * ref_vec(idx);
+            local_norm_h += mass_matrix_diagonal(idx) * d_u(idx) * d_u(idx);
+            local_norm_r += mass_matrix_diagonal(idx) * ref_vec(idx) * ref_vec(idx);
+        }
+        const double corr   = Utilities::MPI::sum(local_corr,   mpi_comm);
+        const double norm_h = Utilities::MPI::sum(local_norm_h, mpi_comm);
+        const double norm_r = Utilities::MPI::sum(local_norm_r, mpi_comm);
+
+        const double normalized = corr / (std::sqrt(norm_h * norm_r) + 1e-30);
+        if (normalized > best_corr)
+        {
+            best_corr = normalized;
+            best_phi  = phi;
+        }
+    }
+
+    // Total phase shift accumulated in T_sim
+    // The numerical phase speed meets: ω_h · T_sim = ω_exact · T_sim - φ
+    const double omega_numerical = omega_exact - best_phi / T_sim;
+    const double c_numerical     = omega_numerical / k;
+
+    return c_numerical;
+}
+
+//-------------------------------------------------------
+// run_dispersion_analysis
+//
+// Head the dispersion for different wave numbers k.
+// The useful range is kh ∈ [π/N, π] where N = 2^ref.
+// kh = π is the Nyquist (the most dispersive) mode.
+// kh → 0 is the continuous limit (error → 0).
+template <int dim>
+std::vector<typename WaveEquation<dim>::DispersionResult>
+WaveEquation<dim>::run_dispersion_analysis(
+    const std::vector<double> &wave_numbers)
+{
+    pcout << "\n=== Analisys Numerical Dispersion ===\n";
+    pcout << "  Scheme: "
+          << (time_scheme == TimeScheme::LEAPFROG ? "Leapfrog" : "Newmark")
+          << "  Q" << fe_degree << "\n";
+    pcout << "  Refinement: " << initial_refinement
+          << "  (h = " << 1.0/std::pow(2.0,initial_refinement) << ")\n\n";
+
+    const double h = 1.0 / std::pow(2.0, initial_refinement);
+
+    std::vector<DispersionResult> results;
+    results.reserve(wave_numbers.size());
+
+    for (double k : wave_numbers)
+    {
+        const double kh = k * h;
+
+        // Use 3 periods: enough to measure the phase shift, not too many to accumulate amplitude errors
+        const double c_h = measure_numerical_phase_speed(k, 3.0);
+
+        DispersionResult r;
+        r.k             = k;
+        r.kh            = kh;
+        r.c_numerical   = c_h;
+        r.c_exact       = c;
+        r.relative_error = (c_h - c) / c;
+        results.push_back(r);
+
+        pcout << "  k=" << k
+              << "  kh=" << kh
+              << "  c_h=" << c_h
+              << "  c_exact=" << c
+              << "  relative_error=" << r.relative_error * 100.0 << "%\n";
+    }
+
+    // Write CSV (only rank 0)
+    if (this_mpi_proc == 0)
+    {
+        std::ofstream f("dispersion.csv");
+        f << "k,kh,c_numerical,c_exact,relative_error_pct\n";
+        for (const auto &r : results)
+            f << r.k << ","
+              << r.kh << ","
+              << r.c_numerical << ","
+              << r.c_exact << ","
+              << r.relative_error * 100.0 << "\n";
+
+        pcout << "\n  Results saved in dispersion.csv\n";
+        pcout << "  Use plot_dispersion.py to visualize.\n";
+    }
+
+    return results;
+}
+
+
+// ------------------------------------------------------------
+// build_newmark_system_matrix
+// Builds A = M_lump + β·dt2·K and initializes the
+// pre-conditioner AMG (Algebraic MultiGrid).
+template <int dim>
+void WaveEquation<dim>::build_newmark_system_matrix()
+{
+    TimerOutput::Scope t(computing_timer, "build_newmark_matrix");
+
+    pcout << "  Building Newmark matrix A = M + β·dt²·K...\n";
+
+    AssertThrow(time_scheme == TimeScheme::NEWMARK,
+        ExcMessage("build_newmark_system_matrix called without NEWMARK mode"));
+
+    // A = β·dt²·K  
+    system_matrix_newmark.copy_from(laplace_matrix);
+    system_matrix_newmark *= newmark_beta * time_step * time_step;
+
+    // A += M  on the diagonal (M is a vector because we use mass lumping)
+    for (const auto idx : locally_owned_dofs)
+        system_matrix_newmark.add(idx, idx, mass_matrix_diagonal(idx));
+
+    // MPI communication for the off-diagonal entries (if any)
+    system_matrix_newmark.compress(VectorOperation::add);
+
+    // AMG preconditioner for A
+    // AMG is more expensive to build (O(n log n)) but much more
+    // efficient for the solve (O(n) vs O(n^1.5) for SSOR).
+    // Building it once amortizes the cost over all time steps.
+    TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
+    amg_data.elliptic              = true;   // A is elliptic (SPD)
+    amg_data.higher_order_elements = (fe_degree > 1);
+    amg_data.smoother_sweeps       = 2;
+    amg_data.aggregation_threshold = 1e-4;
+
+    newmark_preconditioner.initialize(system_matrix_newmark, amg_data);
+
+    newmark_matrix_is_current = true;
+
+    pcout << "  Matrix Newmark and AMG preconditioner ready.\n";
+}
+
+
+
+
+
 // ============================================================
-// Template instantiation per 2D e 3D
+// run_scaling_benchmark
+// Runs n_steps Leapfrog steps without output and measures times
+// with TimerOutput. Back to a ScalingResult.
+template <int dim>
+typename WaveEquation<dim>::ScalingResult
+WaveEquation<dim>::run_scaling_benchmark(unsigned int n_steps)
+{
+    ScalingResult result;
+    result.n_procs = n_mpi_procs;
+    result.n_dofs  = dof_handler.n_dofs();
+    result.n_cells = triangulation.n_global_active_cells();
+
+    // Timer reset 
+    computing_timer.reset();
+
+    // Warm-up: 1 inizialization cache and pipeline MPI
+    {
+        assemble_rhs(0.0);
+        solve_time_step();
+    }
+    // reset after the warmup
+    computing_timer.reset();
+
+    // Benchmark: n_steps 
+    const auto t_start = std::chrono::high_resolution_clock::now();
+
+    for (unsigned int s = 0; s < n_steps; ++s)
+    {
+        time += time_step;
+        solve_time_step();  // include assemble_rhs()
+    }
+
+    const auto t_end = std::chrono::high_resolution_clock::now();
+    result.wall_time_total =
+        std::chrono::duration<double>(t_end - t_start).count();
+
+    // Recover times per section from TimerOutput (labels must match those used in TimerOutput::Scope)
+    const auto &summary = computing_timer.get_summary_data(
+        TimerOutput::total_wall_time);
+
+    result.wall_time_assembly = summary.count("assemble_rhs")
+                              ? summary.at("assemble_rhs")
+                              : 0.0;
+    result.wall_time_solve    = summary.count("solve_leapfrog")
+                              ? summary.at("solve_leapfrog")
+                              : 0.0;
+    result.wall_time_output   = 0.0;  // no output for benchmark
+
+    // Speedup and efficiency are calculated off (require T(1))
+    result.speedup    = 0.0;
+    result.efficiency = 0.0;
+
+    return result;
+}
+
+// ------------------------------------------------------------
+// print_scaling_table
+template <int dim>
+void WaveEquation<dim>::print_scaling_table(
+    const std::vector<ScalingResult> &results,
+    const std::string &label) const
+{
+    if (this_mpi_proc != 0) return;
+
+    pcout << "\n=== " << label << " ===\n";
+    pcout << std::setw(8)  << "Procs"
+          << std::setw(12) << "DoF"
+          << std::setw(10) << "T_tot[s]"
+          << std::setw(10) << "T_asm[s]"
+          << std::setw(10) << "T_slv[s]"
+          << std::setw(10) << "Speedup"
+          << std::setw(12) << "Efficiency"
+          << "\n";
+    pcout << std::string(72, '-') << "\n";
+
+    for (const auto &r : results)
+    {
+        pcout << std::setw(8)  << r.n_procs
+              << std::setw(12) << r.n_dofs
+              << std::setw(10) << std::fixed << std::setprecision(3) << r.wall_time_total
+              << std::setw(10) << r.wall_time_assembly
+              << std::setw(10) << r.wall_time_solve
+              << std::setw(10) << std::setprecision(2) << r.speedup
+              << std::setw(11) << r.efficiency * 100.0 << "%"
+              << "\n";
+    }
+
+    // Saving
+    std::ofstream f(label == "Strong Scaling" ? "strong_scaling.csv"
+                                              : "weak_scaling.csv");
+    f << "n_procs,n_dofs,n_cells,T_total,T_assembly,T_solve,speedup,efficiency\n";
+    for (const auto &r : results)
+        f << r.n_procs << ","
+          << r.n_dofs  << ","
+          << r.n_cells << ","
+          << r.wall_time_total   << ","
+          << r.wall_time_assembly << ","
+          << r.wall_time_solve   << ","
+          << r.speedup           << ","
+          << r.efficiency        << "\n";
+
+    pcout << "  Saved data in "
+          << (label == "Strong Scaling" ? "strong_scaling.csv" : "weak_scaling.csv")
+          << "\n";
+}
+
+
 // ============================================================
+// Template instantiation for 2D and 3D
 template class WaveEquation<2>;
 template class WaveEquation<3>;
