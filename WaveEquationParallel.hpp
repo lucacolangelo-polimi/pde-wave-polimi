@@ -197,7 +197,7 @@ public:
     bool track_energy     = true;
 
     SimulationMode mode        = SimulationMode::PEBBLE_IN_POND;          
-    TimeScheme     time_scheme = TimeScheme::LEAPFROG;              
+    TimeScheme     time_scheme = TimeScheme::NEWMARK;              
 
     // Rifraction parameters (only for mode == REFRACTION)
     double c_fast      = 2.0;
@@ -291,6 +291,9 @@ private:
     IndexSet locally_relevant_dofs;  // owned + ghost
 
     AffineConstraints<double> constraints;
+    // Vincoli solo per hanging nodes, usati per la costruzione della matrice
+    // per garantire la simmetria.
+    AffineConstraints<double> matrix_constraints;
 
     // Distributed matrices (sparse, MPI-aware)
     TrilinosMatrix laplace_matrix;
