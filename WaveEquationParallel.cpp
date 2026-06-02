@@ -343,8 +343,12 @@ void WaveEquation<dim>::assemble_rhs(double t)
     solution_u.update_ghost_values();
 
     // −K·u  (K already includes c²)
-    laplace_matrix.vmult(system_rhs, solution_u);
+    laplace_matrix.vmult(system_rhs, owned_solution_u);
     system_rhs *= -1.0;
+
+    /*
+    (Se usi il damping, assicurati di usare owned_velocity_u(idx) anche nel ciclo for del damping poco sotto).
+    */
 
     // Forcing term f(x,t) for MMS
     if (mode == SimulationMode::MMS_CONVERGENCE)
@@ -490,12 +494,13 @@ void WaveEquation<dim>::solve_time_step_newmark()
     u_pred.compress(VectorOperation::insert);
 
     // RHS_newmark = −K·u_pred 
-    TrilinosVector u_pred_g(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
-    u_pred_g = u_pred;
-    u_pred_g.update_ghost_values();
+    //TrilinosVector u_pred_g(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    //u_pred_g = u_pred;
+    //u_pred_g.update_ghost_values();
 
     TrilinosVector rhs_newmark(locally_owned_dofs, mpi_comm);
-    laplace_matrix.vmult(rhs_newmark, u_pred_g);
+    //laplace_matrix.vmult(rhs_newmark, u_pred_g);
+    laplace_matrix.vmult(rhs_newmark, u_pred);
     rhs_newmark *= -1.0;
 
     //  Solve CG wuth AMG  preconditioner
@@ -565,11 +570,11 @@ double WaveEquation<dim>::compute_potential_energy() //const
 {
     TrilinosVector Ku(locally_owned_dofs, mpi_comm);
     solution_u.update_ghost_values(); 
-    laplace_matrix.vmult(Ku, solution_u);
+    laplace_matrix.vmult(Ku, owned_solution_u);
 
     double local_ep = 0.0;
     for (const auto idx : locally_owned_dofs)
-        local_ep += 0.5 * solution_u(idx) * Ku(idx);
+        local_ep += 0.5 * owned_solution_u(idx) * Ku(idx);
 
     return Utilities::MPI::sum(local_ep, mpi_comm);
 }
