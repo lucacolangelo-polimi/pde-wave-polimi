@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
     {
         // Parsing args (simple manual parsing, can be improved with a library)
         std::string mode_str = "run";
-        unsigned int ref = 6;
+        unsigned int ref = 6;               // default refinement level for scaling and dispersion, for 2D is maybe better 6, for 3D maybe 4 to avoid too large meshes
         for (int i = 1; i < argc; ++i)
         {
             if (std::string(argv[i]) == "--mode" && i + 1 < argc) mode_str = argv[++i];
@@ -17,8 +17,12 @@ int main(int argc, char *argv[])
         }
 
         // Setup 
-        WaveEquation<2> wave(mpi_comm);
+        WaveEquation<2> wave(mpi_comm);         // we can change from 2D to 3D by just changing the template parameter
         wave.initial_refinement = ref;
+
+        wave.time_scheme = TimeScheme::NEWMARK;
+        //wave.time_scheme = TimeScheme::LEAPFROG;            //!!!!!
+        
         wave.time_step = 5.0e-4;
         wave.mode = SimulationMode::PEBBLE_IN_POND;
         wave.use_amr = false; // AMR off for a clean scaling test
@@ -41,7 +45,7 @@ int main(int argc, char *argv[])
         else
         {
             // standard run
-            wave.run();
+            wave.run_convergence_study();        //wave.run(); standard one;  wave.run_convergence_study() for convergence study; 
         }
     }
     catch (std::exception &exc)

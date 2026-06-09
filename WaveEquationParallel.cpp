@@ -116,12 +116,12 @@ void WaveEquation<dim>::setup_system()
           << "  (this process: " << locally_owned_dofs.n_elements() << ")\n";
 
     // CONSTRAINTS
-    // Vengono usati due oggetti per i vincoli:
-    // 1. matrix_constraints: contiene solo i vincoli per gli hanging nodes.
-    //    Viene usato per creare lo schema di sparsità e per assemblare le
-    //    matrici, in modo da non "condensare" la matrice e mantenerla simmetrica.
-    // 2. constraints: contiene hanging nodes E vincoli di Dirichlet. Viene usato
-    //    per applicare i valori al bordo ai vettori (soluzione, termini noti).
+    // for constraints:
+    // 1. matrix_constraints: Contains only the constraints for the hanging nodes.
+    // It is used to create the sparsity scheme and to assemble the
+    // matrices, so as not to "condense" the matrix and keep it symmetric.
+    // 2. constraints: Contains hanging nodes AND Dirichlet constraints. It is used
+    // to apply the boundary values ​​to the vectors (solution, known terms).
     matrix_constraints.clear();
     matrix_constraints.reinit(locally_relevant_dofs);
     DoFTools::make_hanging_node_constraints(dof_handler, matrix_constraints);
@@ -210,7 +210,7 @@ void WaveEquation<dim>::assemble_matrices()
 {
     TimerOutput::Scope t(computing_timer, "assemble_matrices");
 
-    pcout << "  Assembly matrici (MPI, " << n_mpi_procs << " processi)...\n";
+    pcout << "  Assembly matrices (MPI, " << n_mpi_procs << " processes)...\n";
 
     // Reset
     laplace_matrix       = 0.0;
@@ -251,7 +251,8 @@ void WaveEquation<dim>::assemble_matrices()
         if (cell->material_id() == 1)
         {
             cell->get_dof_indices(local_idx);
-            matrix_constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
+            //matrix_constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
+            constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
             continue;
         }
 
@@ -282,8 +283,10 @@ void WaveEquation<dim>::assemble_matrices()
         cell->get_dof_indices(local_idx);
 
         // distribuisce i contributi locali alle matrici globali, usando i vincoli corretti (solo hanging nodes)
-        matrix_constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
-        matrix_constraints.distribute_local_to_global(cell_M, local_idx, mass_matrix_diagonal);
+        // matrix_constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
+        // matrix_constraints.distribute_local_to_global(cell_M, local_idx, mass_matrix_diagonal);
+        constraints.distribute_local_to_global(cell_K, local_idx, laplace_matrix);
+        constraints.distribute_local_to_global(cell_M, local_idx, mass_matrix_diagonal);
 
         // Matric for ABC (absorbing boundary conditions):
         // matrix B = ∫_Γ φ_i φ_j ds 
@@ -303,8 +306,7 @@ void WaveEquation<dim>::assemble_matrices()
                                           * fev_face.shape_value(j, q)
                                           * JxW;
                 }
-                matrix_constraints.distribute_local_to_global(
-                    cell_B, local_idx, boundary_mass_matrix);
+                constraints.distribute_local_to_global(cell_B, local_idx, boundary_mass_matrix);
             }
         }
     }
@@ -355,19 +357,29 @@ void WaveEquation<dim>::assemble_rhs(double t)
 {
     system_rhs = 0.0;
 
-    // MODIFICA CRITICA: Usa owned_solution_u (senza ghost) per vmult
-    laplace_matrix.vmult(system_rhs, owned_solution_u);
+    // Assicura che i ghost siano aggiornati prima della vmult
+    solution_u.update_ghost_values();
+
+    // USA solution_u (CON ghost), non owned_solution_u
+    laplace_matrix.vmult(system_rhs, solution_u);
     system_rhs *= -1.0;
 
     // Forcing term f(x,t) for MMS
     if (mode == SimulationMode::MMS_CONVERGENCE)
     {
         QGauss<dim> q(fe_ptr->degree + 1);
-        FEValues<dim> fev(*fe_ptr, q,
-            update_values | update_quadrature_points | update_JxW_values);
-
-        ForcingTermMMS<dim> forcing(c);
-        forcing.set_time(t);
+        FEValues<dim> fev(*fe_ptr, q, update_values | update_quadrature_points | update_JxW_values);
+        
+        std::unique_ptr<Function<dim>> forcing_ptr;
+        if (use_decay_mms) {
+            auto p = std::make_unique<ForcingTermMMS_Decay<dim>>(c);
+            p->set_time(t);
+            forcing_ptr = std::move(p);
+        } else {
+            auto p = std::make_unique<ForcingTermMMS<dim>>(c);
+            p->set_time(t);
+            forcing_ptr = std::move(p);
+        }
 
         const unsigned int dpc = fe_ptr->dofs_per_cell;
         Vector<double> cell_rhs(dpc);
@@ -378,14 +390,15 @@ void WaveEquation<dim>::assemble_rhs(double t)
             if (!cell->is_locally_owned()) continue;
             fev.reinit(cell);
             cell_rhs = 0.0;
-            for (unsigned int q = 0; q < fev.get_quadrature().size(); ++q)
+            for (unsigned int q_pt = 0; q_pt < q.size(); ++q_pt)
             {
-                const double fval = forcing.value(fev.quadrature_point(q));
+                const double fval = forcing_ptr->value(fev.quadrature_point(q_pt));
                 for (unsigned int i = 0; i < dpc; ++i)
-                    cell_rhs(i) += fev.shape_value(i, q) * fval * fev.JxW(q);
+                    cell_rhs(i) += fev.shape_value(i, q_pt) * fval * fev.JxW(q_pt);
             }
             cell->get_dof_indices(local_idx);
-            constraints.distribute_local_to_global(cell_rhs, local_idx, system_rhs);
+            matrix_constraints.distribute_local_to_global(cell_rhs, local_idx, system_rhs);
+            //constraints.distribute_local_to_global(cell_B, local_idx, boundary_mass_matrix);
         }
         system_rhs.compress(VectorOperation::add);
     }
@@ -393,8 +406,9 @@ void WaveEquation<dim>::assemble_rhs(double t)
     // ABC: −c·B·v
     if (use_absorbing_bc)
     {
+        velocity_u.update_ghost_values(); // Assicurati di aggiornare anche la velocità
         TrilinosVector abc_contrib(locally_owned_dofs, mpi_comm);
-        boundary_mass_matrix.vmult(abc_contrib, owned_velocity_u);
+        boundary_mass_matrix.vmult(abc_contrib, velocity_u); // Usa velocity_u
         system_rhs.add(-c, abc_contrib);
     }
 
@@ -420,7 +434,7 @@ void WaveEquation<dim>::solve_time_step()
 {
     TimerOutput::Scope t(computing_timer, "solve_leapfrog");
 
-    assemble_rhs(time);
+    assemble_rhs(time - time_step);
 
     // Update ghost values for the vectors we read
     solution_u.update_ghost_values();
@@ -483,20 +497,19 @@ void WaveEquation<dim>::solve_time_step_newmark()
 {
     TimerOutput::Scope timer(computing_timer, "solve_newmark");
 
-    // Security check: the matrix must be updated
     AssertThrow(newmark_matrix_is_current,
-        ExcMessage("build_newmark_system_matrix() not called! "
-                   "Call assemble_matrices() before the time loop."));
+        ExcMessage("build_newmark_system_matrix() not called!"));
 
     const double dt  = time_step;
     const double b   = newmark_beta;
     const double gam = newmark_gamma;
 
+    // 1. Aggiorna i ghost prima di iniziare
     solution_u.update_ghost_values();
     velocity_u.update_ghost_values();
     acceleration_u.update_ghost_values();
 
-    // predictors u_pred, v_pred (owned only, no ghost)
+    // 2. Calcola i predittori
     TrilinosVector u_pred(locally_owned_dofs, mpi_comm);
     TrilinosVector v_pred(locally_owned_dofs, mpi_comm);
     for (const auto idx : locally_owned_dofs)
@@ -509,39 +522,78 @@ void WaveEquation<dim>::solve_time_step_newmark()
     }
     u_pred.compress(VectorOperation::insert);
 
-    // RHS_newmark = −K·u_pred 
+    TrilinosVector u_pred_ghosted(locally_owned_dofs, locally_relevant_dofs, mpi_comm);
+    u_pred_ghosted = u_pred;
+    u_pred_ghosted.update_ghost_values();
 
+    
+    //----- DIAGNOSI: norma di u_pred e del RHS elastico
+    /*pcout << "    [diag] |u_pred|=" << u_pred.l2_norm();
+
+    TrilinosVector test_Ku(locally_owned_dofs, mpi_comm);
+    laplace_matrix.vmult(test_Ku, u_pred_ghosted);
+    pcout << "  |K*u_pred|=" << test_Ku.l2_norm() << "\n";
+    //-------
+    */
+
+    // 3. Costruisci il lato destro: RHS = F(t_{n+1}) - K * u_pred
     TrilinosVector rhs_newmark(locally_owned_dofs, mpi_comm);
-    laplace_matrix.vmult(rhs_newmark, u_pred);
+    
+    // --> Termine elastico: -K * u_pred
+    laplace_matrix.vmult(rhs_newmark, u_pred_ghosted);
     rhs_newmark *= -1.0;
 
+    // --> Termine forzante esatto a t_{n+1}
+    if (mode == SimulationMode::MMS_CONVERGENCE)
+    {
+        QGauss<dim> q(fe_ptr->degree + 1);
+        FEValues<dim> fev(*fe_ptr, q, update_values | update_quadrature_points | update_JxW_values);
+        
+        ForcingTermMMS<dim> forcing(c); // NOTA: se il tuo costruttore richiede la velocità dell'onda, aggiungila qui, es: forcing(wave_speed)
+        forcing.set_time(time);      // time è già t_{n+1} nel loop principale
+
+        Vector<double> cell_rhs(fe_ptr->dofs_per_cell);
+        std::vector<types::global_dof_index> local_idx(fe_ptr->dofs_per_cell);
+        TrilinosVector F_ext(locally_owned_dofs, mpi_comm);
+
+        for (const auto &cell : dof_handler.active_cell_iterators())
+        {
+            if (!cell->is_locally_owned()) continue;
+            fev.reinit(cell);
+            cell_rhs = 0.0;
+            for (unsigned int q_pt = 0; q_pt < fev.get_quadrature().size(); ++q_pt)
+            {
+                const double fval = forcing.value(fev.quadrature_point(q_pt));
+                for (unsigned int i = 0; i < fe_ptr->dofs_per_cell; ++i)
+                    cell_rhs(i) += fev.shape_value(i, q_pt) * fval * fev.JxW(q_pt);
+            }
+            cell->get_dof_indices(local_idx);
+            // Uso dei vincoli corretti invece del loop manuale
+            matrix_constraints.distribute_local_to_global(cell_rhs, local_idx, F_ext);
+        }
+        F_ext.compress(VectorOperation::add);
+        rhs_newmark.add(1.0, F_ext); // Aggiunge F(t_{n+1}) al lato destro
+    }
+
+    // Azzera i gradi di libertà sui bordi di Dirichlet
     constraints.set_zero(rhs_newmark);
 
-    //  Solve CG wuth AMG  preconditioner
-    // system_matrix_newmark it's already built and the AMG preconditioner is initialized, so no overhead in the time loop
+    // 4. Risoluzione del sistema A * a_new = rhs_newmark
     TrilinosVector a_new(locally_owned_dofs, mpi_comm);
-
     SolverControl solver_control(500, 1e-10 * rhs_newmark.l2_norm() + 1e-30);
     TrilinosWrappers::SolverCG cg_solver(solver_control);
 
-    // Uses the preconditioner that is already initialized — no overhead
-    cg_solver.solve(system_matrix_newmark,
-                    a_new,
-                    rhs_newmark,
-                    newmark_preconditioner);
-
+    cg_solver.solve(system_matrix_newmark, a_new, rhs_newmark, newmark_preconditioner);
     constraints.distribute(a_new);
 
-    // Log iterations only every output_every_n_steps per not "fill" stdout
     if (step_number % output_every_n_steps == 0)
-        pcout << "    Newmark CG: " << solver_control.last_step()
-              << " iterazioni (AMG)\n";
+        pcout << "    Newmark CG: " << solver_control.last_step() << " iterazioni\n";
 
-    // CORRECTORS
+    // 5. Correttori finali
     for (const auto idx : locally_owned_dofs)
     {
-        owned_solution_u(idx)    = u_pred(idx) + b * dt * dt * a_new(idx);
-        owned_velocity_u(idx)    = v_pred(idx) + gam * dt * a_new(idx);
+        owned_solution_u(idx)     = u_pred(idx) + b * dt * dt * a_new(idx);
+        owned_velocity_u(idx)     = v_pred(idx) + gam * dt * a_new(idx);
         owned_acceleration_u(idx) = a_new(idx);
     }
     constraints.distribute(owned_solution_u);
@@ -580,15 +632,17 @@ double WaveEquation<dim>::compute_kinetic_energy() //const
 // E_p = 0.5 · u^T · K · u
 // laplace_matrix.vmult() already distrubuted
 template <int dim>
-double WaveEquation<dim>::compute_potential_energy() //const
+double WaveEquation<dim>::compute_potential_energy()
 {
     TrilinosVector Ku(locally_owned_dofs, mpi_comm);
-    // Usa owned_solution_u per la vmult
-    laplace_matrix.vmult(Ku, owned_solution_u);
+    
+    // Aggiorna i ghost prima di moltiplicare
+    solution_u.update_ghost_values();
+    laplace_matrix.vmult(Ku, solution_u); // Usa solution_u
 
     double local_ep = 0.0;
     for (const auto idx : locally_owned_dofs)
-        local_ep += 0.5 * owned_solution_u(idx) * Ku(idx);
+        local_ep += 0.5 * solution_u(idx) * Ku(idx); // Usa solution_u
 
     return Utilities::MPI::sum(local_ep, mpi_comm);
 }
@@ -612,26 +666,25 @@ double WaveEquation<dim>::compute_Linfty_norm()  //const
 // VectorTools::integrate_difference already parallel:
 // calculates the local error and then MPI_Allreduce
 template <int dim>
-std::pair<double, double> WaveEquation<dim>::compute_errors(double t) const
+std::pair<double,double> WaveEquation<dim>::compute_errors(double t) const
 {
-    ExactSolutionMMS<dim> exact(c);
-    exact.set_time(t);
+    std::unique_ptr<Function<dim>> exact_ptr;
+    if (use_decay_mms) {
+        auto p = std::make_unique<ExactSolutionMMS_Decay<dim>>(c);
+        p->set_time(t);
+        exact_ptr = std::move(p);
+    } else {
+        auto p = std::make_unique<ExactSolutionMMS<dim>>(c);
+        p->set_time(t);
+        exact_ptr = std::move(p);
+    }
 
     Vector<float> diff(triangulation.n_active_cells());
+    VectorTools::integrate_difference(dof_handler, solution_u, *exact_ptr, diff, QGauss<dim>(fe_ptr->degree + 2), VectorTools::L2_norm);
+    const double L2 = VectorTools::compute_global_error(triangulation, diff, VectorTools::L2_norm);
 
-    VectorTools::integrate_difference(
-        dof_handler, solution_u, exact, diff,
-        QGauss<dim>(fe_ptr->degree + 2),
-        VectorTools::L2_norm);
-    const double L2 = VectorTools::compute_global_error(
-        triangulation, diff, VectorTools::L2_norm);
-
-    VectorTools::integrate_difference(
-        dof_handler, solution_u, exact, diff,
-        QGauss<dim>(fe_ptr->degree + 2),
-        VectorTools::H1_seminorm);
-    const double H1 = VectorTools::compute_global_error(
-        triangulation, diff, VectorTools::H1_seminorm);
+    VectorTools::integrate_difference(dof_handler, solution_u, *exact_ptr, diff, QGauss<dim>(fe_ptr->degree + 2), VectorTools::H1_seminorm);
+    const double H1 = VectorTools::compute_global_error(triangulation, diff, VectorTools::H1_seminorm);
 
     return {L2, H1};
 }
@@ -916,7 +969,7 @@ void WaveEquation<dim>::run()
     energy_initial     = 0.0;
     pcout << "\n=======================================\n"
           << "  WaveEquation<" << dim << ">  MPI  "
-          << n_mpi_procs << " processi\n  Modo: ";
+          << n_mpi_procs << " processi\n  Modes: ";
     switch (mode)
     {
         case SimulationMode::PEBBLE_IN_POND:  pcout << "Pebble in Pond\n";  break;
@@ -975,7 +1028,7 @@ void WaveEquation<dim>::run()
     {
         // two gaussian wave packets centered at s1 and s2 (interference pattern)
         const double amp   = 1.0;
-        const double width = 0.05;
+        const double width = 0.15;                                                              // 0.15 is betetr for 3d, 0.05 is suitable for 2d (more localized)
         const Point<dim> s1(0.3, 0.5), s2(0.7, 0.5);
 
         // We use interpolated with a lambda function via FunctionFromFunctionObjects (easier: we scroll through local support points)
@@ -1154,112 +1207,163 @@ void WaveEquation<dim>::run()
     computing_timer.print_summary();
 }
 
+
+template <int dim>
+void WaveEquation<dim>::perform_single_mms_run(unsigned int ref, double dt)
+{
+    triangulation.clear();
+    initial_refinement = ref;
+    time_step = dt;
+
+    make_grid();
+    setup_system();
+    assemble_matrices();
+
+    // Setup ICs dinamico
+    if (use_decay_mms) {
+        InitialDisplacementMMS_Decay<dim> u0;
+        InitialVelocityMMS_Decay<dim>     u1;
+        VectorTools::interpolate(dof_handler, u0, owned_solution_u);
+        VectorTools::interpolate(dof_handler, u1, owned_velocity_u);
+    } else {
+        InitialDisplacementMMS<dim> u0;
+        InitialVelocityMMS<dim>     u1;
+        VectorTools::interpolate(dof_handler, u0, owned_solution_u);
+        VectorTools::interpolate(dof_handler, u1, owned_velocity_u);
+    }
+
+    constraints.distribute(owned_solution_u);
+    solution_u = owned_solution_u;
+    velocity_u = owned_velocity_u;
+
+    // DIAGNOSI a0
+    pcout << "    [diag a0] |a0|=" << owned_acceleration_u.l2_norm()
+      << "  min(M)=" << mass_matrix_diagonal.min() << "\n";
+
+    // --- Calcolo Errore Iniziale (t=0) ---
+    // DICHIARO L2_t0 E H1_t0 UNA SOLA VOLTA QUI
+    auto [L2_t0, H1_t0] = compute_errors(0.0);                  
+    pcout << "  [t=0] L2=" << L2_t0 << "  H1=" << H1_t0 << "\n";
+
+    // Sincronizzazione
+    solution_u.update_ghost_values();
+    velocity_u.update_ghost_values();
+    
+    // Calcolo accelerazione a0 
+    assemble_rhs(0.0);
+    for (const auto idx : locally_owned_dofs)
+    {
+        if (constraints.is_constrained(idx))
+            owned_acceleration_u(idx) = 0.0;
+        else
+            owned_acceleration_u(idx) = system_rhs(idx) / mass_matrix_diagonal(idx);
+    }
+    constraints.distribute(owned_acceleration_u);
+    acceleration_u = owned_acceleration_u;
+    acceleration_u.update_ghost_values();
+
+    // --- DIAGNOSI (DEBUG) ---
+    // Ora uso i nomi delle variabili già dichiarate sopra (senza 'auto')
+    time = time_step; 
+    step_number = 1;
+    if (time_scheme == TimeScheme::LEAPFROG) solve_time_step();
+    else solve_time_step_newmark();
+
+    auto [L2_t1, H1_t1] = compute_errors(time);
+    pcout << "  [1 step] L2=" << L2_t1 << "\n";
+    // -------------------------
+
+    // --- Loop principale ---
+    const unsigned int saved_output = output_every_n_steps;
+    output_every_n_steps = std::numeric_limits<unsigned int>::max();
+
+    time = 0.0; step_number = 0;
+    const unsigned int n_steps = static_cast<unsigned int>(end_time / time_step);
+    
+    while (step_number < n_steps) {
+        step_number++;
+        time += time_step;
+        if (time_scheme == TimeScheme::LEAPFROG) solve_time_step();
+        else solve_time_step_newmark();
+    }
+
+    output_every_n_steps = saved_output;
+    
+    // Calcola l'errore finale (usa variabili nuove, quindi qui serve 'auto')
+    auto [L2_end, H1_end] = compute_errors(time);
+
+    // Popola la tabella (usa le variabili dichiarate all'inizio)
+    convergence_table.add_value("Level", ref);
+    convergence_table.add_value("h", 1.0 / std::pow(2.0, ref));
+    convergence_table.add_value("L2_t0", L2_t0);
+    convergence_table.add_value("H1_t0", H1_t0);
+    convergence_table.add_value("L2_end", L2_end);
+    convergence_table.add_value("H1_end", H1_end);
+}
+
 // ============================================================
 // run_convergence_study  —  MMS on refining levels
 template <int dim>
 void WaveEquation<dim>::run_convergence_study()
 {
-    pcout << "\n=== Convergence Study MMS ("
-          << n_mpi_procs << " MPI processes, Q"
-          << fe_degree << ", "
-          << (time_scheme == TimeScheme::LEAPFROG ? "Leapfrog" : "Newmark-β")
-          << ") ===\n";
+    mode     = SimulationMode::MMS_CONVERGENCE;
+    use_amr  = false;
+    end_time = 0.05;                                        //1!
 
-    mode    = SimulationMode::MMS_CONVERGENCE;
-    use_amr = false;
-    end_time = 1.0;
-
-    const std::vector<unsigned int> levels = {3, 4, 5, 6, 7};
-
-    for (unsigned int ref : levels)
+    // --- Studio 1: convergenza spaziale ---
+    // dt = 0.1*h^2 => errore temporale O(dt) = O(0.1*h^2) << O(h^2)
+    pcout << "\n=== ANALISI SPAZIALE (dt = 0.1 * h^2) ===\n";
+    for (unsigned int ref : {3u, 4u, 5u, 6u})
     {
-        newmark_matrix_is_current = false;
-        pcout << "\n--- Level " << ref << " ---\n";
-
-        triangulation.clear();
-        initial_refinement = ref;
-
-        const double h = 1.0 / std::pow(2.0, ref);
-        time_step = (time_scheme == TimeScheme::LEAPFROG)
-                  ? 0.4 * h / c
-                  : 0.5 * h;
-        const unsigned int n_steps =
-            static_cast<unsigned int>(end_time / time_step);
-
-        pcout << "  h=" << h << "  dt=" << time_step
-              << "  steps=" << n_steps << "\n";
-
-        make_grid();
-        setup_system();
-        assemble_matrices();
-
-        // IC MMS
-        InitialDisplacementMMS<dim> u0;
-        InitialVelocityMMS<dim>     u1;
-        VectorTools::interpolate(dof_handler, u0, owned_solution_u);
-        constraints.distribute(owned_solution_u);
-        solution_u = owned_solution_u;
-
-        VectorTools::interpolate(dof_handler, u1, owned_velocity_u);
-        for (const auto idx : locally_owned_dofs)
-            owned_solution_u_old(idx) = owned_solution_u(idx)
-                                      - time_step * owned_velocity_u(idx);
-        solution_u_old = owned_solution_u_old;
-        velocity_u     = owned_velocity_u;
-        owned_acceleration_u = 0.0;
-        acceleration_u       = owned_acceleration_u;
-
-        solution_u.update_ghost_values();
-        solution_u_old.update_ghost_values();
-        velocity_u.update_ghost_values();
-
-        // Loop without output
-        time = 0.0; step_number = 0;
-        while (step_number < n_steps)
-        {
-            step_number++;
-            time += time_step;
-            if (time_scheme == TimeScheme::LEAPFROG)
-                solve_time_step();
-            else
-                solve_time_step_newmark();
-        }
-
-        auto [L2, H1] = compute_errors(time);
-        pcout << "  L2=" << L2 << "  H1=" << H1 << "\n";
-
-        convergence_table.add_value("Level", ref);
-        convergence_table.add_value("Cells",   (unsigned int)triangulation.n_global_active_cells());
-        convergence_table.add_value("DoF",     dof_handler.n_dofs());
-        convergence_table.add_value("h",       h);
-        convergence_table.add_value("L2",      L2);
-        convergence_table.add_value("H1",      H1);
+        const double h  = 1.0 / std::pow(2.0, ref);
+        const double dt = 0.1 * h * h;
+        pcout << "  Level=" << ref << "  h=" << h
+              << "  dt=" << dt
+              << "  steps=" << (unsigned int)(end_time/dt) << "\n";
+        perform_single_mms_run(ref, dt);
     }
 
-    convergence_table.set_precision("h",  4);
-    convergence_table.set_precision("L2", 6);
-    convergence_table.set_precision("H1", 6);
-    convergence_table.set_scientific("h",  true);
-    convergence_table.set_scientific("L2", true);
-    convergence_table.set_scientific("H1", true);
-    convergence_table.evaluate_convergence_rates(
-        "L2", ConvergenceTable::reduction_rate_log2);
-    convergence_table.evaluate_convergence_rates(
-        "H1", ConvergenceTable::reduction_rate_log2);
+    // --- Studio 2: convergenza temporale ---
+    // h fissa (ref=5, h=0.03125), dt dimezza
+    // Newmark trapezoidale: errore globale = O(dt^2) => rate atteso = 2
+    pcout << "\n=== ANALISI TEMPORALE (ref=5 fisso) ===\n";
+    for (double dt_val : {0.025, 0.0125, 0.00625, 0.003125})
+    {
+        pcout << "  dt=" << dt_val
+              << "  steps=" << (unsigned int)(end_time/dt_val) << "\n";
+        perform_single_mms_run(5, dt_val);
+    }
 
-    // Only rank 0 prints the table and saves it in convergence_table.txt
+    // --- Tabella ---
+    // Imposta la formattazione
+    convergence_table.set_precision("h", 4);
+    convergence_table.set_scientific("h", true);
+    
+    convergence_table.set_precision("L2_t0", 6);
+    convergence_table.set_scientific("L2_t0", true);
+    convergence_table.set_precision("H1_t0", 6);
+    convergence_table.set_scientific("H1_t0", true);
+    
+    convergence_table.set_precision("L2_end", 6);
+    convergence_table.set_scientific("L2_end", true);
+    convergence_table.set_precision("H1_end", 6);
+    convergence_table.set_scientific("H1_end", true);
+
+    // CHIEDI A DEAL.II DI CALCOLARE I RATE PER t=0 E t=end
+    convergence_table.evaluate_convergence_rates("L2_t0", ConvergenceTable::reduction_rate_log2);
+    convergence_table.evaluate_convergence_rates("H1_t0", ConvergenceTable::reduction_rate_log2);
+    
+    convergence_table.evaluate_convergence_rates("L2_end", ConvergenceTable::reduction_rate_log2);
+    convergence_table.evaluate_convergence_rates("H1_end", ConvergenceTable::reduction_rate_log2);
+
     if (this_mpi_proc == 0)
     {
-        pcout << "\n=== Convergence Table ===\n";
+        pcout << "\n=== TABELLA CONVERGENZA FINALE ===\n";
         convergence_table.write_text(std::cout);
-        std::ofstream f("convergence_table.txt");
-        convergence_table.write_text(f);
-        pcout << "Table saved in convergence_table.txt\n";
     }
 
     computing_timer.print_summary();
 }
-
 
 
 //------------------------------------------------------------------------------------
@@ -1451,7 +1555,7 @@ WaveEquation<dim>::run_dispersion_analysis(
     return results;
 }
 
-
+/*
 // ------------------------------------------------------------
 // build_newmark_system_matrix
 // Builds A = M_lump + β·dt2·K and initializes the
@@ -1470,7 +1574,9 @@ void WaveEquation<dim>::build_newmark_system_matrix()
     system_matrix_newmark = 0.0;
 
     QGauss<dim>        q_stiff(fe_ptr->degree + 1);
-    QGaussLobatto<dim> q_mass (fe_ptr->degree + 1);
+    QGaussLobatto<dim> q_mass (fe_ptr->degree + 1);                                 
+    //QGauss<dim> q_mass(fe_ptr->degree + 2);           //!! per provare la matrice di massa consistente (non lumped)
+
     FEValues<dim> fev_stiff(*fe_ptr, q_stiff,
         update_gradients | update_JxW_values | update_quadrature_points);
     FEValues<dim> fev_mass(*fe_ptr, q_mass,
@@ -1520,6 +1626,17 @@ void WaveEquation<dim>::build_newmark_system_matrix()
                 cell_A(i, i) += phi * phi * JxW;
             }
         }
+        
+
+        // MATRICE CONSISTENTE
+        //for (unsigned int q = 0; q < q_mass.size(); ++q)
+        //{
+        //const double JxW = fev_mass.JxW(q);
+        //for (unsigned int i = 0; i < dpc; ++i)
+        //    for (unsigned int j = 0; j < dpc; ++j)
+        //        cell_A(i, j) += fev_mass.shape_value(i, q) * fev_mass.shape_value(j, q) * JxW;
+        //}
+        
 
         cell->get_dof_indices(local_idx);
 
@@ -1530,18 +1647,52 @@ void WaveEquation<dim>::build_newmark_system_matrix()
 
     system_matrix_newmark.compress(VectorOperation::add);
 
-    // AMG preconditioner
-    TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
-    amg_data.elliptic              = true;
-    amg_data.higher_order_elements = (fe_degree > 1);
-    amg_data.smoother_sweeps       = 2;
-    amg_data.aggregation_threshold = 1e-4;
+    // AMG preconditioner                                                                       !!
+    //TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
+    //amg_data.elliptic              = true;
+    //amg_data.higher_order_elements = (fe_degree > 1);
+    //amg_data.smoother_sweeps       = 2;
+    //amg_data.aggregation_threshold = 1e-4;
 
-    newmark_preconditioner.initialize(system_matrix_newmark, amg_data);
+    //newmark_preconditioner.initialize(system_matrix_newmark, amg_data);
+    //newmark_matrix_is_current = true;
+    //pcout << "  Matrix Newmark and AMG preconditioner ready.\n";
+    
+
+    // ILU preconditioner (perfetto per matrici fortemente dominanti diagonali)
+    TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
+    newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
+    newmark_matrix_is_current = true;
+    pcout << "  Matrix Newmark and ILU preconditioner ready.\n";
+}
+*/
+
+
+template <int dim>
+void WaveEquation<dim>::build_newmark_system_matrix()
+{
+    TimerOutput::Scope t(computing_timer, "build_newmark_matrix");
+    pcout << "  Building Newmark matrix A = M + β·dt²·K...\n";
+
+    AssertThrow(time_scheme == TimeScheme::NEWMARK,
+        ExcMessage("build_newmark_system_matrix without NEWMARK"));
+
+    // A = β·dt²·K
+    system_matrix_newmark.copy_from(laplace_matrix);
+    system_matrix_newmark *= (newmark_beta * time_step * time_step);
+
+    // A += M_lumped sulla diagonale
+    for (const auto idx : locally_owned_dofs)
+        system_matrix_newmark.add(idx, idx, mass_matrix_diagonal(idx));
+
+    system_matrix_newmark.compress(VectorOperation::add);
+
+    // Precondizionatore ILU
+    TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
+    newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
 
     newmark_matrix_is_current = true;
-
-    pcout << "  Matrix Newmark and AMG preconditioner ready.\n";
+    pcout << "  Matrix Newmark and ILU preconditioner ready.\n";
 }
 
 

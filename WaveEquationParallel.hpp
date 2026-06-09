@@ -124,11 +124,9 @@ template <int dim>
 class InitialVelocityMMS : public Function<dim>
 {
 public:
-    double value(const Point<dim> &p, const unsigned int = 0) const override
+    double value(const Point<dim> &/*p*/, const unsigned int = 0) const override
     {
-        double v = -M_PI * std::sin(M_PI * p[0]) * std::sin(M_PI * p[1]);
-        if constexpr (dim == 3) v *= std::sin(M_PI * p[2]);
-        return v;
+        return 0.0; // La derivata di cos(pi*t) valutata in t=0 è ZERO!
     }
 };
 
@@ -146,6 +144,61 @@ public:
                           * std::sin(M_PI * p[1]);
         if constexpr (dim == 3) v *= std::sin(M_PI * p[2]);
         return v;
+    }
+private:
+    double c;
+};
+
+template <int dim>
+class ExactSolutionMMS_Decay : public Function<dim>                                             ///new decay
+{
+public:
+    ExactSolutionMMS_Decay(double c_wave = 1.0) : Function<dim>(1), c(c_wave) {}
+    virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        return std::exp(-this->get_time()) * std::sin(M_PI * p[0]) * std::sin(M_PI * p[1]);
+    }
+    virtual Tensor<1,dim> gradient(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        const double common = std::exp(-this->get_time());
+        Tensor<1,dim> g;
+        g[0] = common * M_PI * std::cos(M_PI*p[0]) * std::sin(M_PI*p[1]);
+        g[1] = common * M_PI * std::sin(M_PI*p[0]) * std::cos(M_PI*p[1]);
+        return g;
+    }
+private:
+    double c;
+};
+
+template <int dim>
+class InitialDisplacementMMS_Decay : public Function<dim>                                           //new decay
+{
+public:
+    virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        return std::sin(M_PI * p[0]) * std::sin(M_PI * p[1]);
+    }
+};
+
+template <int dim>
+class InitialVelocityMMS_Decay : public Function<dim>                                               //new decay
+{
+public:
+    virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        return -std::sin(M_PI * p[0]) * std::sin(M_PI * p[1]);
+    }
+};
+
+template <int dim>
+class ForcingTermMMS_Decay : public Function<dim>                                                   //new decay
+{
+public:
+    ForcingTermMMS_Decay(double c_wave = 1.0) : Function<dim>(1), c(c_wave) {}
+    virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+    {
+        const double factor = 1.0 + 2.0 * M_PI * M_PI * c * c;
+        return factor * std::exp(-this->get_time()) * std::sin(M_PI * p[0]) * std::sin(M_PI * p[1]);
     }
 private:
     double c;
@@ -209,6 +262,8 @@ public:
     double       amr_refine_fraction  = 0.30;
     double       amr_coarsen_fraction = 0.10;
 
+    bool use_decay_mms = false;                               //new decay
+
     unsigned int output_every_n_steps = 10;
 
     // Constructor/ run method
@@ -257,6 +312,7 @@ private:
     void refine_mesh();
     void output_results(unsigned int step);
     void check_cfl_condition() const;
+    void perform_single_mms_run(unsigned int ref, double dt);
 
     double compute_kinetic_energy(); //  const;
     double compute_potential_energy(); //const;
@@ -266,7 +322,8 @@ private:
 
     //NEWMR MATRIX AND PRECONDITIONER 
     bool newmark_matrix_is_current = false;
-    TrilinosWrappers::PreconditionAMG newmark_preconditioner;
+    //TrilinosWrappers::PreconditionAMG newmark_preconditioner;                 //amr preconditioner, good for elliptic problems but non-optimal per Newmark (non-elliptic)
+    TrilinosWrappers::PreconditionILU newmark_preconditioner;                   // ILU preconditioner, good for strongly diagonally dominant matrices like those from Newmark
 
     // Constructs A = M + β·dt²·K and initializes the AMG preconditioner.
     // Called after assemble_matrices() and after refine_mesh() (mesh changed).
