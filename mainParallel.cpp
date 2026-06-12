@@ -141,18 +141,60 @@ int main(int argc, char *argv[])
             wave.run();
         }
         // =========================================================================
+        // 8. SCENARIO FISICO: DAMPING (Sponge Layers / Absorbing BC)
+        // =========================================================================
+        else if (mode_str == "damping")
+        {
+            // Assicurati di avere DAMPING (o ABC) definito nel tuo enum SimulationMode
+            wave.mode                = SimulationMode::DAMPED_WAVE;
+            wave.time_scheme         = TimeScheme::LEAPFROG;
+            wave.time_step           = 1.0e-3;
+            wave.end_time            = 1.5; // Più lungo per dare tempo all'onda di uscire dallo schermo
+            
+            wave.use_amr             = true;
+            wave.amr_every_n_steps   = 5;
+            wave.max_refinement_level = 7;
+            
+            wave.output_every_n_steps = 10; 
+            wave.track_energy         = true; // CRITICO: ci serve per dimostrare l'assorbimento
+
+            wave.run();
+        }
+
+        /// =========================================================================
+        // 9. SCENARIO FISICO: ABSORBING BC (Sommerfeld Boundary Conditions)
+        // =========================================================================
+        else if (mode_str == "absorbing")
+        {
+            wave.mode                = SimulationMode::ABSORBING_BC;
+            wave.use_absorbing_bc    = true; // Usiamo il flag booleano che hai nel tuo .hpp!
+            wave.time_scheme         = TimeScheme::LEAPFROG;
+            wave.time_step           = 1.0e-3;
+            wave.end_time            = 1.5; 
+            
+            wave.use_amr             = true;
+            wave.amr_every_n_steps   = 5;
+            wave.max_refinement_level = 7;
+            
+            wave.output_every_n_steps = 10; 
+            wave.track_energy         = true;
+
+            wave.run();
+        }
+
+        // =========================================================================
         // MODALITÀ SCONOSCIUTA
         // =========================================================================
-        
         else
         {
             if (Utilities::MPI::this_mpi_process(mpi_comm) == 0)
             {
                 std::cout << "Modalita non riconosciuta!\n"
-                          << "Scegli tra: strong, weak, dispersion, mms, pebble, interference\n";
+                          << "Scegli tra: strong, weak, dispersion, mms, pebble, interference, refraction, diffraction, damping, absorbing\n";
             }
         }
     }
+    
     catch (std::exception &exc)
     {
         std::cerr << "Errore catturato nel main: " << exc.what() << "\n";

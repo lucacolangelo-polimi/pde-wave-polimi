@@ -368,6 +368,9 @@ private:
     TrilinosVector acceleration_u;      // a^n (Newmark)
     TrilinosVector system_rhs;          // RHS (locally owned, no ghost)
 
+    // Vettore per il profilo dello Sponge Layer
+    TrilinosVector nodal_sponge_profile;
+
     // "owned only" vectors for the update (no ghost, for writing)
     TrilinosVector owned_solution_u;
     TrilinosVector owned_solution_u_old;
