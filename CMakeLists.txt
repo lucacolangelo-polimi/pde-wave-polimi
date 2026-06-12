@@ -10,8 +10,19 @@ add_executable(wave_equation
   mainParallel.cpp
   WaveEquationParallel.cpp
 )
-
 deal_ii_setup_target(wave_equation)
+
+add_executable(wave_equation_standard
+  main.cpp
+  WaveEquation.cpp
+)
+deal_ii_setup_target(wave_equation_standard)
+
+add_executable(wave_equation_optimized
+  mainOptimized.cpp
+  WaveEquationOptimized.cpp
+)
+deal_ii_setup_target(wave_equation_optimized)
 
 message(STATUS "deal.II trovato in: ${DEAL_II_DIR}")
 message(STATUS "MPI abilitato: ${DEAL_II_WITH_MPI}")
@@ -24,3 +35,5 @@ if(NOT DEAL_II_WITH_MPI OR NOT DEAL_II_WITH_TRILINOS OR NOT DEAL_II_WITH_P4EST)
     "Controlla la tua installazione della libreria."
   )
 endif()
+add_executable(test_st test_st2.cpp)
+deal_ii_setup_target(test_st)

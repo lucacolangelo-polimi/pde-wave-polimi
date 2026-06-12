@@ -84,6 +84,7 @@ void WaveEquation<dim>::setup_system()
                                                  Functions::ZeroFunction<dim>(),
                                                  constraints);
     }
+    DoFTools::make_hanging_node_constraints(dof_handler, constraints);
     constraints.close();
 
     // Sparsity pattern                                                         //creates a map with the non-zero entries of the matrix, based on the DoF connectivity and constraints. This is needed to efficiently allocate memory for the sparse matrix.
@@ -302,14 +303,15 @@ void WaveEquation<dim>::solve_time_step()
                           - solution_u_old(i)
                           + (time_step * time_step) * acceleration(i);
 
-    // Apply Dirichlet BCs (zero out constrained dofs)
-    if (!use_absorbing_bc)
-        constraints.distribute(solution_u_new);
+    // Apply constraints (Dirichlet BCs and hanging nodes)
+    constraints.distribute(solution_u_new);
 
     // Update velocity estimate: v^n = (u^{n+1} - u^{n-1}) / (2*dt)
     // Used for damping and ABC at next step.
     for (unsigned int i = 0; i < dof_handler.n_dofs(); ++i)
         velocity_u(i) = (solution_u_new(i) - solution_u_old(i)) / (2.0 * time_step);
+
+    constraints.distribute(velocity_u);
 
     // Shift solution vectors
     solution_u_old = solution_u;
@@ -443,9 +445,9 @@ void WaveEquation<dim>::refine_mesh()
     triangulation.prepare_coarsening_and_refinement();
 
     // Transfer solution_u and solution_u_old to the new mesh
-    SolutionTransfer<dim, Vector<double>> solution_transfer(dof_handler);       //solution transfer si occupa di "proiettare" matematicamente l'onda dalla vecchia mesh a quella nuova
-    std::vector<Vector<double>> x_vectors = {solution_u, solution_u_old, velocity_u};
-    solution_transfer.prepare_for_coarsening_and_refinement(x_vectors);
+    SolutionTransfer<dim, Vector<double>> st(dof_handler);
+    std::vector<Vector<double>> all_in = {solution_u, solution_u_old, velocity_u};
+    st.prepare_for_coarsening_and_refinement(all_in);
 
     triangulation.execute_coarsening_and_refinement();
 
@@ -461,6 +463,7 @@ void WaveEquation<dim>::refine_mesh()
                                                  0,
                                                  Functions::ZeroFunction<dim>(),
                                                  constraints);
+    DoFTools::make_hanging_node_constraints(dof_handler, constraints);
     constraints.close();
 
     // Rebuild sparsity and matrices
@@ -474,12 +477,12 @@ void WaveEquation<dim>::refine_mesh()
         boundary_mass_matrix.reinit(sparsity_pattern);
 
     // Interpolate old solutions onto new mesh
-    std::vector<Vector<double>> tmp(3, Vector<double>(dof_handler.n_dofs()));
-    solution_transfer.interpolate(x_vectors, tmp);
+    std::vector<Vector<double>> all_out(3, Vector<double>(dof_handler.n_dofs()));
+    st.interpolate(all_in, all_out);
 
-    solution_u     = tmp[0];
-    solution_u_old = tmp[1];
-    velocity_u     = tmp[2];
+    solution_u     = all_out[0];
+    solution_u_old = all_out[1];
+    velocity_u     = all_out[2];
     solution_u_new.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs());
 
@@ -561,8 +564,13 @@ void WaveEquation<dim>::run()
         velocity_u     = 0.0;
     }
 
+    // Ensure initial solutions satisfy hanging nodes and BCs
     constraints.distribute(solution_u);
     constraints.distribute(solution_u_old);
+    // Also velocity_u needs constraints if it was initialized to non-zero 
+    // without them. Since we use velocity_u = 0 or velocity_u = vel_vector,
+    // we distribute it as well.
+    constraints.distribute(velocity_u);
 
     // 4. Output step 0
     output_results(0);

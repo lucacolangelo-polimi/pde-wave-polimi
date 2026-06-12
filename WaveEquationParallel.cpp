@@ -475,14 +475,15 @@ void WaveEquation<dim>::solve_time_step()
                               + dt2 * owned_acceleration_u(idx);
     }
 
-    //Apply Dirichlet constraints: local operation
-    if (!use_absorbing_bc)
-        constraints.distribute(owned_solution_u);
+    //Apply constraints: local operation
+    constraints.distribute(owned_solution_u);
 
     // Centered speed: v^n = (u^{n+1} − u^{n-1}) / (2·dt)
     for (const auto idx : locally_owned_dofs)
         owned_velocity_u(idx) = (owned_solution_u(idx) - solution_u_old(idx))
                               / (2.0 * time_step);
+
+    constraints.distribute(owned_velocity_u);
 
     // Shift: advances one step 
     // Copy owned → ghost (update_ghost_values propagates to neighbors)
@@ -549,7 +550,7 @@ void WaveEquation<dim>::solve_time_step_newmark()
     TrilinosVector rhs_newmark(locally_owned_dofs, mpi_comm);
     
     // --> Termine elastico: -K * u_pred
-    laplace_matrix.vmult(rhs_newmark, u_pred_ghosted);
+    laplace_matrix.vmult(rhs_newmark, u_pred);
     rhs_newmark *= -1.0;
 
     // --> Termine forzante esatto a t_{n+1}
@@ -645,13 +646,14 @@ double WaveEquation<dim>::compute_potential_energy()
 {
     TrilinosVector Ku(locally_owned_dofs, mpi_comm);
     
-    // Aggiorna i ghost prima di moltiplicare
-    solution_u.update_ghost_values();
-    laplace_matrix.vmult(Ku, solution_u); // Usa solution_u
+    // Usa owned_solution_u (non ha ghost, richiesto da Trilinos per vmult)
+    laplace_matrix.vmult(Ku, owned_solution_u);
 
     double local_ep = 0.0;
     for (const auto idx : locally_owned_dofs)
-        local_ep += 0.5 * solution_u(idx) * Ku(idx); // Usa solution_u
+    {
+        local_ep += 0.5 * owned_solution_u(idx) * Ku(idx);
+    }
 
     return Utilities::MPI::sum(local_ep, mpi_comm);
 }
@@ -850,29 +852,18 @@ void WaveEquation<dim>::refine_mesh()
 
     triangulation.prepare_coarsening_and_refinement();
 
-    // SolutionTransfer distributed
-    // Note: parallel::distributed::SolutionTransfer wants
-    // only one vector per call. We use three transfers
-    // separated or a chained vector (we use three calls).
-    parallel::distributed::SolutionTransfer<dim, TrilinosVector>
-        st_u(dof_handler), st_u_old(dof_handler), st_v(dof_handler);
+    parallel::distributed::SolutionTransfer<dim, TrilinosVector> st(dof_handler);
 
     solution_u.update_ghost_values();
     solution_u_old.update_ghost_values();
     velocity_u.update_ghost_values();
 
-    st_u.prepare_for_coarsening_and_refinement(solution_u);
-    st_u_old.prepare_for_coarsening_and_refinement(solution_u_old);
-    st_v.prepare_for_coarsening_and_refinement(velocity_u);
+    std::vector<const TrilinosVector*> all_in = {&solution_u, &solution_u_old, &velocity_u};
+    st.prepare_for_coarsening_and_refinement(all_in);
 
-    // Esegue il ripartizionamento geometrico di p4est
+    // Esegue il refinement fisico e il partizionamento (p4est)
     triangulation.execute_coarsening_and_refinement();
 
-    // Redistributes DoF on new mesh
-    dof_handler.distribute_dofs(*fe_ptr);
-
-    pcout << "  AMR: DoF globali=" << dof_handler.n_dofs()
-          << "  celle=" << triangulation.n_global_active_cells() << "\n";
 
     // =======================================================
     // FIX FONDAMENTALE: Reinizializza l'intero sistema
@@ -886,12 +877,12 @@ void WaveEquation<dim>::refine_mesh()
     TrilinosVector interp_u_old(locally_owned_dofs, mpi_comm);
     TrilinosVector interp_v(locally_owned_dofs, mpi_comm);
 
-    st_u.interpolate(interp_u);
-    st_u_old.interpolate(interp_u_old);
-    st_v.interpolate(interp_v);
+    std::vector<TrilinosVector*> all_out = {&interp_u, &interp_u_old, &interp_v};
+    st.interpolate(all_out);
 
     constraints.distribute(interp_u);
     constraints.distribute(interp_u_old);
+    constraints.distribute(interp_v);
 
     solution_u     = interp_u;
     solution_u_old = interp_u_old;
@@ -1012,21 +1003,24 @@ void WaveEquation<dim>::run()
     {
         // two gaussian wave packets centered at s1 and s2 (interference pattern)
         const double amp   = 1.0;
-        const double width = 0.15;                                                              // 0.15 is betetr for 3d, 0.05 is suitable for 2d (more localized)
+        const double width = 0.15;
         const Point<dim> s1(0.3, 0.5), s2(0.7, 0.5);
 
-        // We use interpolated with a lambda function via FunctionFromFunctionObjects (easier: we scroll through local support points)
-        std::vector<Point<dim>> sp(dof_handler.n_dofs());
-        MappingQ1<dim> mapping;
-        DoFTools::map_dofs_to_support_points(mapping, dof_handler, sp);
-
-        for (const auto idx : locally_owned_dofs)
+        struct TwoPebblesFunction : public Function<dim>
         {
-            const double d1 = s1.distance_square(sp[idx]);
-            const double d2 = s2.distance_square(sp[idx]);
-            owned_solution_u(idx) = amp * std::exp(-d1 / (width*width))
-                                  + amp * std::exp(-d2 / (width*width));
-        }
+            TwoPebblesFunction() : Function<dim>(1) {}
+            virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+            {
+                const double width = 0.15;
+                const double amp = 1.0;
+                const Point<dim> s1(0.3, 0.5), s2(0.7, 0.5);
+                return amp * std::exp(-s1.distance_square(p) / (width * width)) +
+                       amp * std::exp(-s2.distance_square(p) / (width * width));
+            }
+        } u0;
+
+        VectorTools::interpolate(dof_handler, u0, owned_solution_u);
+        
         constraints.distribute(owned_solution_u);
         solution_u     = owned_solution_u;
         solution_u_old = owned_solution_u;
@@ -1035,22 +1029,20 @@ void WaveEquation<dim>::run()
     }
     else
     {
-        // single gaussian wave packet centered at s1 (pebble in pond)
-        std::vector<Point<dim>> sp(dof_handler.n_dofs());
-        MappingQ1<dim> mapping;
-        DoFTools::map_dofs_to_support_points(mapping, dof_handler, sp);
-
-        const double amp   = 1.0;
-        const double width = 0.05;
-        const Point<dim> center = (dim == 2)
-            ? Point<dim>(0.25, 0.5)
-            : Point<dim>(0.25, 0.5, 0.5);
-
-        for (const auto idx : locally_owned_dofs)
+        struct PebbleFunction : public Function<dim>
         {
-            const double d2 = center.distance_square(sp[idx]);
-            owned_solution_u(idx) = amp * std::exp(-d2 / (width*width));
-        }
+            PebbleFunction() : Function<dim>(1) {}
+            virtual double value(const Point<dim> &p, const unsigned int = 0) const override
+            {
+                const double width = 0.05;
+                const double amp = 1.0;
+                const Point<dim> center = (dim == 2) ? Point<dim>(0.25, 0.5) : Point<dim>(0.25, 0.5, 0.5);
+                return amp * std::exp(-center.distance_square(p) / (width * width));
+            }
+        } u0;
+
+        VectorTools::interpolate(dof_handler, u0, owned_solution_u);
+
         constraints.distribute(owned_solution_u);
         solution_u     = owned_solution_u;
         solution_u_old = owned_solution_u;
@@ -1221,6 +1213,7 @@ void WaveEquation<dim>::perform_single_mms_run(unsigned int ref, double dt)
     }
 
     constraints.distribute(owned_solution_u);
+    constraints.distribute(owned_velocity_u);
     solution_u = owned_solution_u;
     velocity_u = owned_velocity_u;
 
@@ -1423,7 +1416,9 @@ double WaveEquation<dim>::measure_numerical_phase_speed(
         d_rhs = 0.0;
 
         // RHS = -K·u
-        laplace_matrix.vmult(d_rhs, d_u);
+        TrilinosVector d_u_owned(locally_owned_dofs, mpi_comm);
+        d_u_owned = d_u;
+        laplace_matrix.vmult(d_rhs, d_u_owned);
         d_rhs *= -1.0;
 
         // a = M^{-1} · RHS
