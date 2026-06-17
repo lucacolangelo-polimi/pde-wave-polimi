@@ -1,4 +1,4 @@
-#ifndef WAVE_EQUATIONPARALLEL_H
+#ifndef WAVE_EQUATIONPARALLEL_H                     //last version
 #define WAVE_EQUATIONPARALLEL_H
 
 #include <deal.II/distributed/tria.h>               // deal.II distributed 
@@ -126,7 +126,7 @@ class InitialVelocityMMS : public Function<dim>
 public:
     double value(const Point<dim> &/*p*/, const unsigned int = 0) const override
     {
-        return 0.0; // La derivata di cos(pi*t) valutata in t=0 è ZERO!
+        return 0.0; // The derivative of cos(pi*t) evaluated at t=0 is ZERO!
     }
 };
 
@@ -150,7 +150,7 @@ private:
 };
 
 template <int dim>
-class ExactSolutionMMS_Decay : public Function<dim>                                             ///new decay
+class ExactSolutionMMS_Decay : public Function<dim>                                             //new decay solution
 {
 public:
     ExactSolutionMMS_Decay(double c_wave = 1.0) : Function<dim>(1), c(c_wave) {}
@@ -171,7 +171,7 @@ private:
 };
 
 template <int dim>
-class InitialDisplacementMMS_Decay : public Function<dim>                                           //new decay
+class InitialDisplacementMMS_Decay : public Function<dim>                                           //new decay solution
 {
 public:
     virtual double value(const Point<dim> &p, const unsigned int = 0) const override
@@ -181,7 +181,7 @@ public:
 };
 
 template <int dim>
-class InitialVelocityMMS_Decay : public Function<dim>                                               //new decay
+class InitialVelocityMMS_Decay : public Function<dim>                                               //new decay solution
 {
 public:
     virtual double value(const Point<dim> &p, const unsigned int = 0) const override
@@ -191,7 +191,7 @@ public:
 };
 
 template <int dim>
-class ForcingTermMMS_Decay : public Function<dim>                                                   //new decay
+class ForcingTermMMS_Decay : public Function<dim>                                                   //new decay solution
 {
 public:
     ForcingTermMMS_Decay(double c_wave = 1.0) : Function<dim>(1), c(c_wave) {}
@@ -262,7 +262,7 @@ public:
     double       amr_refine_fraction  = 0.30;
     double       amr_coarsen_fraction = 0.10;
 
-    bool use_decay_mms = false;                               //new decay
+    bool use_decay_mms = false;                               //new decay solution
 
     unsigned int output_every_n_steps = 10;
 

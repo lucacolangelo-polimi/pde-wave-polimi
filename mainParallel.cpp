@@ -1,4 +1,4 @@
-#include "WaveEquationParallel.hpp"
+#include "WaveEquationParallel.hpp"             //last version
 
 int main(int argc, char *argv[])
 {
@@ -7,9 +7,9 @@ int main(int argc, char *argv[])
 
     try
     {
-        // Parsing dei parametri da riga di comando
-        std::string mode_str = "mms";       // Default: studio di convergenza MMS
-        unsigned int ref = 4;               // Livello di raffinamento iniziale baseline
+        // Parsing command-line parameters
+        std::string mode_str = "mms";       // Default: MMS convergence study
+        unsigned int ref = 4;               // Initial baseline refinement level
         
         for (int i = 1; i < argc; ++i)
         {
@@ -21,23 +21,23 @@ int main(int argc, char *argv[])
         wave.initial_refinement = ref;
 
         // =========================================================================
-        // 1. MODALITÀ DI BENCHMARK: STRONG / WEAK SCALING
+        // 1. STRONG / WEAK SCALING
         // =========================================================================
         if (mode_str == "strong" || mode_str == "weak")
         {
-            wave.time_scheme = TimeScheme::NEWMARK;
+            wave.time_scheme = TimeScheme::NEWMARK; // Newmark used for scaling benchmarks;        
             wave.time_step = 5.0e-4;
             wave.mode = SimulationMode::PEBBLE_IN_POND;
-            wave.use_amr = false; // AMR spento per avere test di scaling puliti
+            wave.use_amr = false; // AMR turned off for clean scaling tests
 
             wave.prepare_for_analysis(); 
             auto result = wave.run_scaling_benchmark(100);
             
-            // Salva un file CSV dedicato in base alla modalità scelta
+            // Save a dedicated CSV file based on the chosen mode
             wave.print_scaling_table({result}, mode_str + "_scaling.csv");
         }
         // =========================================================================
-        // 2. MODALITÀ ANALISI DI DISPERSIONE NUMERICA
+        // 2. NUMERICAL DISPERSION ANALYSIS MODE
         // =========================================================================
         else if (mode_str == "dispersion")
         {
@@ -52,7 +52,7 @@ int main(int argc, char *argv[])
             wave.run_dispersion_analysis(kvals);
         }
         // =========================================================================
-        // 3. MODALITÀ VERIFICA MATEMATICA (MMS - Da lanciare con 1 solo processo)
+        // 3. MATH VERIFICATION MODE (MMS - To be launched with only 1 process)
         // =========================================================================
         else if (mode_str == "mms")
         {
@@ -60,27 +60,27 @@ int main(int argc, char *argv[])
             wave.run_convergence_study();
         }
         // =========================================================================
-        // 4. SCENARIO FISICO: PEBBLE IN POND (Con supporto AMR)
+        // 4. PEBBLE IN POND (With AMR support)
         // =========================================================================
         else if (mode_str == "pebble")
         {
             wave.mode                = SimulationMode::PEBBLE_IN_POND;
-            wave.time_scheme         = TimeScheme::LEAPFROG; // Molto veloce per gli scenari fisici
+            wave.time_scheme         = TimeScheme::LEAPFROG; // Very fast for physics scenarios
             wave.time_step           = 1.0e-3;
             wave.end_time            = 1.0;
             
-            // Configurazione modulo AMR (p4est)
+            // AMR module configuration (p4est)
             wave.use_amr             = true;
             wave.amr_every_n_steps   = 5;
             wave.max_refinement_level = 7; 
             
-            wave.output_every_n_steps = 10; // Genera un file .pvtu ogni 10 step
+            wave.output_every_n_steps = 10; // Generate a .pvtu file every 10 steps
             wave.track_energy         = true;
 
             wave.run();
         }
         // =========================================================================
-        // 5. SCENARIO FISICO: INTERFERENCE (Con supporto AMR)
+        // 5. INTERFERENCE (With AMR support)
         // =========================================================================
 
         else if (mode_str == "interference")
@@ -90,7 +90,7 @@ int main(int argc, char *argv[])
             wave.time_step           = 1.0e-3;
             wave.end_time            = 1.0;
             
-            // Configurazione modulo AMR (p4est)
+            // AMR module configuration (p4est)
             wave.use_amr             = true;
             wave.amr_every_n_steps   = 5;
             wave.max_refinement_level = 7;
@@ -101,14 +101,14 @@ int main(int argc, char *argv[])
             wave.run();
         }
         // =========================================================================
-        // 6. SCENARIO FISICO: REFRACTION (Eterogeneità del mezzo)
+        // 6. REFRACTION (Eterogeneous medium with AMR support)
         // =========================================================================
         else if (mode_str == "refraction")
         {
             wave.mode                = SimulationMode::REFRACTION;
             wave.time_scheme         = TimeScheme::LEAPFROG;
-            // Per la rifrazione, la CFL è dettata dalla c_fast (che è più grande di c).
-            // Usiamo un dt più piccolo per essere sicuri di non far esplodere il Leapfrog.
+            // For refraction, the CFL is dictated by c_fast (which is larger than c).
+            // We use a smaller dt to ensure we don't blow up the Leapfrog.
             wave.time_step           = 5.0e-4; 
             wave.end_time            = 1.0;
             
@@ -116,19 +116,19 @@ int main(int argc, char *argv[])
             wave.amr_every_n_steps   = 5;
             wave.max_refinement_level = 7;
             
-            wave.output_every_n_steps = 20; // Salviamo un po' meno spesso per non riempire il disco
+            wave.output_every_n_steps = 20; // Let's save a little less often so as not to fill up the disk
             wave.track_energy         = true;
 
             wave.run();
         }
         // =========================================================================
-        // 7. SCENARIO FISICO: DIFFRACTION (Ostacolo con fessura)
+        // 7. DIFFRACTION  (Internal obstacle + slit, with AMR support)
         // =========================================================================
         else if (mode_str == "diffraction")
         {
             wave.mode                = SimulationMode::DIFFRACTION;
             wave.time_scheme         = TimeScheme::LEAPFROG;
-            wave.time_step           = 5.0e-4; // dt prudenziale per i bordi rigidi della fessura
+            wave.time_step           = 5.0e-4; // dt caution for rigid crack edges
             wave.end_time            = 1.0;
             
             wave.use_amr             = true;
@@ -141,33 +141,33 @@ int main(int argc, char *argv[])
             wave.run();
         }
         // =========================================================================
-        // 8. SCENARIO FISICO: DAMPING (Sponge Layers / Absorbing BC)
+        // 8. DAMPING (Sponge Layers / Absorbing BC)
         // =========================================================================
         else if (mode_str == "damping")
         {
-            // Assicurati di avere DAMPING (o ABC) definito nel tuo enum SimulationMode
+
             wave.mode                = SimulationMode::DAMPED_WAVE;
             wave.time_scheme         = TimeScheme::LEAPFROG;
             wave.time_step           = 1.0e-3;
-            wave.end_time            = 1.5; // Più lungo per dare tempo all'onda di uscire dallo schermo
+            wave.end_time            = 1.5; // Longer to give the wave time to exit the screen
             
             wave.use_amr             = true;
             wave.amr_every_n_steps   = 5;
             wave.max_refinement_level = 7;
             
             wave.output_every_n_steps = 10; 
-            wave.track_energy         = true; // CRITICO: ci serve per dimostrare l'assorbimento
+            wave.track_energy         = true; // we need it to demonstrate absorption
 
             wave.run();
         }
 
         /// =========================================================================
-        // 9. SCENARIO FISICO: ABSORBING BC (Sommerfeld Boundary Conditions)
+        // 9.  ABSORBING BC (Sommerfeld Boundary Conditions)
         // =========================================================================
         else if (mode_str == "absorbing")
         {
             wave.mode                = SimulationMode::ABSORBING_BC;
-            wave.use_absorbing_bc    = true; // Usiamo il flag booleano che hai nel tuo .hpp!
+            wave.use_absorbing_bc    = true; 
             wave.time_scheme         = TimeScheme::LEAPFROG;
             wave.time_step           = 1.0e-3;
             wave.end_time            = 1.5; 
@@ -183,21 +183,21 @@ int main(int argc, char *argv[])
         }
 
         // =========================================================================
-        // MODALITÀ SCONOSCIUTA
+        // UNRECOGNIZED MODE
         // =========================================================================
         else
         {
             if (Utilities::MPI::this_mpi_process(mpi_comm) == 0)
             {
-                std::cout << "Modalita non riconosciuta!\n"
-                          << "Scegli tra: strong, weak, dispersion, mms, pebble, interference, refraction, diffraction, damping, absorbing\n";
+                std::cout << "Unrecognized mode!\n"
+                          << "Choose from: strong, weak, dispersion, mms, pebble, interference, refraction, diffraction, damping, absorbing\n";
             }
         }
     }
     
     catch (std::exception &exc)
     {
-        std::cerr << "Errore catturato nel main: " << exc.what() << "\n";
+        std::cerr << "Error caught in main: " << exc.what() << "\n";
         return 1;
     }
 
