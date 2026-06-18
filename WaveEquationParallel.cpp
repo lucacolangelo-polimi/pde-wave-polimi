@@ -1679,8 +1679,10 @@ void WaveEquation<dim>::build_newmark_system_matrix()
 // ============================================================
 // run_scaling_benchmark
 // Runs n_steps time steps without output and measures wall-clock time
+template <int dim>
 typename WaveEquation<dim>::ScalingResult
 WaveEquation<dim>::run_scaling_benchmark(unsigned int n_steps)
+
 {
     ScalingResult result;
     result.n_procs = n_mpi_procs;
