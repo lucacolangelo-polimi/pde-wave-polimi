@@ -1,183 +1,188 @@
-# Solving the Wave Equation
+# Solving the Wave Equation — MPI Parallel FEM Solver
 
-General formula:
+A distributed-memory finite element solver for the 2D/3D scalar wave equation,
+developed as a final project for the Numerical Methods for PDEs course at
+Politecnico di Milano.
 
-$$
-\frac{\partial^2 u}{\partial t^2} - \Delta u = f \quad \text{in } \Omega \times (0,T]
-$$
-
-$$
-u = g \quad \text{on } \partial\Omega \times [0,T]
-$$
+## General formulation
 
 $$
-u(x,0) = u_0(x) \quad \text{in } \Omega
+\frac{\partial^2 u}{\partial t^2} - \nabla \cdot (c^2(\mathbf{x}) \nabla u) = f \quad \text{in } \Omega \times (0,T]
 $$
 
 $$
-\frac{\partial u}{\partial t}(x,0) = u_1(x) \quad \text{in } \Omega
+u = 0 \quad \text{on } \partial\Omega \times (0,T]
+$$
+
+$$
+u(\mathbf{x},0) = u_0(\mathbf{x}) \quad \text{in } \Omega
+$$
+
+$$
+\frac{\partial u}{\partial t}(\mathbf{x},0) = u_1(\mathbf{x}) \quad \text{in } \Omega
 $$
 
 Where:
-
-- $u(x,t)$ is the unknown function (the wave field).
-- $\Omega$ is the spatial domain.
-- $\partial\Omega$ is the boundary of the domain.
-- The Laplace operator is defined as:
-
-$$
-\Delta u = \frac{\partial^2 u}{\partial x_1^2} + \frac{\partial^2 u}{\partial x_2^2}
-$$
+- $u(\mathbf{x},t)$ is the displacement field
+- $c(\mathbf{x}) > 0$ is the local wave speed (possibly heterogeneous)
+- $\Omega = [0,1]^d$ with $d = 2, 3$
+- Homogeneous Dirichlet boundary conditions are imposed on $\partial\Omega$
 
 # 1. Term-by-term analysis
 
 ### a. Partial Differential Equation (PDE)
 
 $$
-\frac{\partial^2 u}{\partial t^2} - \Delta u = f \quad \text{in } \Omega \times (0,T]
+\frac{\partial^2 u}{\partial t^2} - \nabla \cdot (c^2(\mathbf{x}) \nabla u) = f
 $$
 
-### Hyperbolic term
+**Hyperbolic term** — $\frac{\partial^2 u}{\partial t^2}$: acceleration of the field, makes the equation hyperbolic.
 
-$\frac{\partial^2 u}{\partial t^2}$  
-Represents the acceleration of the field over time. This is the key term that makes the equation hyperbolic and describes wave propagation.
+**Spatial term** — $\nabla \cdot (c^2(\mathbf{x}) \nabla u)$: restoring forces within the medium. The spatially varying wave speed $c(\mathbf{x})$ allows modeling heterogeneous media (refraction).
 
-### Spatial term
-
-$\Delta u$  
-Represents restoring forces or internal stresses within the medium. It is the source of spatial propagation of the motion.
-
-### Forcing term
-
-$f$  
-Represents an external energy source or applied force acting on the system within the domain. If $f = 0$, the equation is homogeneous and describes freely propagating waves.
-
-**Note:** The standard form of the wave equation includes a propagation constant $c^2$:
-
-$$
-\frac{\partial^2 u}{\partial t^2} - c^2 \Delta u = f
-$$
-
-In our problem, it is implicitly assumed that $c = 1$ (unit propagation speed).
-
----
+**Forcing term** — $f$: external energy source. If $f = 0$ the equation describes freely propagating waves.
 
 ### b. Boundary Condition
 
-$$
-u = g \quad \text{on } \partial\Omega \times [0,T]
-$$
-
-This is a **Dirichlet boundary condition**.  
-It specifies the value of the wave field $u$ along the boundary $\partial\Omega$ of the domain for all times. $g$ is a known function.  
-If $g = 0$, the boundary is “fixed,” or—depending on interpretation—an “ideal absorbing boundary.”
-
----
+Homogeneous Dirichlet conditions $u = 0$ on $\partial\Omega$ model rigid boundaries.
 
 ### c. Initial Conditions
 
-Because the wave equation is second order in time, it requires **two initial conditions** to define the solution uniquely:
-
-- $u_0$: the initial configuration (initial displacement) of the wave field at time $t = 0$.  
-- $u_1$: the initial velocity of the wave field at time $t = 0$.
+Two initial conditions are required (second-order in time):
+- $u_0(\mathbf{x})$: initial displacement
+- $u_1(\mathbf{x})$: initial velocity
 
 # 2. Weak Form
 
-For the homogeneous equation (with $f = 0$ and $g = 0$), multiplying by a test function $v \in H_0^1(\Omega)$ and integrating over $\Omega$, we get:
+Multiplying by a test function $v \in H_0^1(\Omega)$ and integrating over $\Omega$,
+applying Green's first identity to eliminate the divergence term:
 
 $$
-\int_\Omega \frac{\partial^2 u}{\partial t^2} v \, dx - \int_\Omega \Delta u \, v \, dx = 0
+\int_\Omega \frac{\partial^2 u}{\partial t^2} v \, d\mathbf{x}
++ \int_\Omega c^2(\mathbf{x}) \nabla u \cdot \nabla v \, d\mathbf{x}
+= \int_\Omega f v \, d\mathbf{x} \quad \forall v \in H_0^1(\Omega)
 $$
 
-Applying integration by parts (Green's theorem) to the Laplacian term:
+The boundary integral vanishes because $v = 0$ on $\partial\Omega$.
 
-$$
-\int_\Omega \frac{\partial^2 u}{\partial t^2} v \, dx + \int_\Omega \nabla u \cdot \nabla v \, dx = 0
-$$
+# 3. Space Discretization — Galerkin FEM
 
-The FEM implementation is based on the discretization of this weak form.
+The domain is discretized with $Q_1$ isoparametric elements (`FE_Q<dim>(1)`)
+on a quadrilateral mesh. The discrete solution
 
-### Implications for the Numerical Solution
+$$u_h(\mathbf{x},t) = \sum_{j=1}^{N_h} U_j(t)\,\varphi_j(\mathbf{x})$$
 
-The hyperbolic nature of the equation is crucial for our implementation: numerical stability relies on the correct handling of the time-derivative term in conjunction with the spatial discretization.
+leads to the semi-discrete system:
 
----
+$$\mathbf{M}\,\ddot{\mathbf{U}}(t) + \mathbf{K}\,\mathbf{U}(t) = \mathbf{F}(t)$$
 
-# 3. Time Discretization
+where:
+- **$M$** — lumped mass matrix (assembled via Gauss-Lobatto quadrature, diagonal)
+- **$K$** — stiffness matrix with $c^2(\mathbf{x})$ sampled at quadrature points
+- **$F$** — load vector
 
-Since the problem is time-dependent, we use a time integration method. We chose the **Centered Finite Difference Method** (also known as the **Leapfrog scheme**).
+Mass lumping via Gauss-Lobatto quadrature makes $M$ diagonal, enabling
+trivial inversion $O(N_h)$ with no linear solver.
 
-The choice of the time-stepping method strongly affects **numerical stability** (CFL condition).
+# 4. Time Discretization
 
----
+Two schemes are implemented:
 
-# 4. Space Discretization
+### Leapfrog (explicit, symplectic)
 
-This is where the Finite Element Method (FEM) comes into play. To use FEM, the problem is reformulated in its weak form within an appropriate functional space (typically $H^1(\Omega)$) and discretized using the **deal.II library**.
+$$\mathbf{U}^{n+1} = 2\mathbf{U}^n - \mathbf{U}^{n-1} + \Delta t^2 (\mathbf{M}^L)^{-1}(\mathbf{F}^n - \mathbf{K}\mathbf{U}^n)$$
 
----
+No linear solver required. Subject to the CFL condition:
 
-# 5. General Structure of the Project
+$$\Delta t \leq \frac{h_{\min}}{c_{\max}\sqrt{d}}$$
 
-The goal of this project is to solve the 2D wave equation using the **deal.II library** for the Finite Element Method (FEM) in space and an **explicit time-stepping scheme**. The solver follows these main steps:
+Used for all physical simulations.
 
-## a. Mesh Generation and DoF Management
-- The domain $\Omega$ is triangulated using deal.II's `Triangulation` class.
-- We generate a structured grid (e.g., `GridGenerator::hyper_cube`) or import it from external formats (e.g., Gmsh).
-- Degrees of Freedom (DoFs) are distributed using a **P1 finite element space** (`FE_SimplexP<dim>(1)`), representing linear polynomials on each triangle.
+### Newmark-β (implicit, unconditionally stable)
 
-## b. System Assembly
-Using deal.II's `FEValues` and quadrature formulas (`QGauss`), we compute the system matrices:
-- **Mass Matrix ($M$)**: Represents the $L^2$ inner product of basis functions $\int \phi_i \phi_j$.
-- **Stiffness Matrix ($K$)**: Represents the inner product of gradients $\int \nabla \phi_i \cdot \nabla \phi_j$.
+$$(\mathbf{M}^L + \beta\Delta t^2 \mathbf{K})\,\ddot{\mathbf{U}}^{n+1} = \mathbf{F}^{n+1} - \mathbf{K}\tilde{\mathbf{U}}^{n+1}$$
 
-## c. Boundary Conditions
-- **Dirichlet boundaries** (where $u=g$) are handled by identifying boundary DoFs and applying constraints to the solution vectors or the system matrix.
+with $\beta = 1/4$, $\gamma = 1/2$ (trapezoidal rule). Solved via CG + ILU preconditioner
+(Trilinos). Used exclusively for the MMS convergence study, where very small
+$\Delta t = 0.1h^2$ would violate the CFL condition.
 
-## d. Time-Stepping Scheme (Leapfrog)
-We implement the explicit central difference scheme:
+# 5. MPI Parallelization
 
-$$
-U^{n+1} = 2 U^n - U^{n-1} + \Delta t^2 M^{-1} (F^n - K U^n)
-$$
+The solver is fully distributed via MPI using deal.II's
+`parallel::distributed::Triangulation` and Trilinos for linear algebra.
 
-In the deal.II implementation, solving $M^{-1}$ typically involves solving a linear system ($M a = RHS$) at each step using a Solver (like Conjugate Gradient) or using Mass Lumping techniques.
+Key design choices:
+- **`locally_owned_dofs`**: DoFs written by each process
+- **`locally_relevant_dofs`**: owned + ghost DoFs (needed for assembly)
+- **Two constraint objects**: `matrix_constraints` (hanging nodes only,
+  for matrix assembly) and `constraints` (hanging nodes + Dirichlet BC,
+  for vectors)
+- **AMR**: `KellyErrorEstimator` + `SolutionTransfer` on three vectors
+  ($U^n$, $U^{n-1}$, $\dot{U}^n$)
 
-## e. Output and Analysis
-- The solution is exported at regular time intervals using `DataOut` in **VTK format**.
-- Results can be visualized in **Paraview** to observe wave propagation, reflection, and interference.
+# 6. Code Architecture
 
----
+### `WaveEquation<dim>` class
 
-# 6. Code Architecture with deal.II
+Single templated class (`dim` ∈ {2,3}) encapsulating the full pipeline.
 
-The project leverages the **deal.II** library structure. Instead of separating Mesh, Assembly, and Solver into different classes, the logic is encapsulated within a single template class that manages the entire simulation lifecycle.
+| Method | Description |
+|--------|-------------|
+| `make_grid()` | Generates $[0,1]^d$ mesh via `GridGenerator::hyper_cube` |
+| `make_grid_with_obstacle()` | Mesh with internal wall for diffraction |
+| `setup_system()` | Distributes DoFs, builds constraints and sparsity pattern |
+| `assemble_matrices()` | Assembles $K$ and $M^L$ on locally owned cells |
+| `solve_time_step()` | Leapfrog explicit update |
+| `solve_time_step_newmark()` | Newmark predictor-corrector update |
+| `refine_mesh()` | AMR with p4est + SolutionTransfer |
+| `run()` | Main time loop with energy tracking and VTK output |
+| `run_convergence_study()` | MMS verification |
+| `run_scaling_benchmark()` | Strong/weak scaling benchmarks |
 
-### The `WaveEquation<dim>` Class
-This is the core class of the project. It relies on C++ templates to be dimension-independent (working seamlessly in 2D or 3D).
+### Simulation modes
 
-#### 1. Setup and Grid Management (`make_grid`, `setup_system`)
-- **`make_grid()`**: Generates the geometry using `GridGenerator` or reads a mesh file using `GridIn`. It handles global refinement.
-- **`setup_system()`**: Initializes the `DoFHandler`, computes the sparsity pattern, and resizes the sparse matrices ($M$, $K$) and solution vectors ($U_{old}, U_{curr}, U_{new}$) to the correct size.
+| Mode | Description |
+|------|-------------|
+| `mms` | MMS convergence study (Newmark, single process) |
+| `pebble` | Gaussian pulse propagation (Leapfrog + AMR) |
+| `interference` | Two-source interference pattern (Leapfrog + AMR) |
+| `refraction` | Heterogeneous wave speed $c(\mathbf{x})$ (Leapfrog + AMR) |
+| `diffraction` | Rigid wall with narrow slit (Leapfrog + AMR) |
+| `damping` | Viscous sponge layer (Leapfrog + AMR) |
+| `absorbing` | Sommerfeld absorbing BC (Leapfrog + AMR) |
+| `strong` | Strong scaling benchmark (Newmark) |
+| `weak` | Weak scaling benchmark (Newmark) |
 
-#### 2. Assembly (`assemble_system`)
-- This method populates the **Mass Matrix** and **Stiffness Matrix**.
-- It iterates over all active cells, initializes `FEValues`, computes local contributions via quadrature, and distributes them into the global sparse matrices.
-- This is done **once** before the time loop (since the mesh is static).
+# 7. Dependencies
 
-#### 3. Time Evolution (`run`, `solve_time_step`)
-- **`run()`**: The main driver. It orchestrates the setup, applies initial conditions, and executes the time loop.
-- **`solve_time_step()`**: Implements the algebraic operations for the Leapfrog scheme. It computes the Right-Hand Side (RHS), solves the linear system involving the Mass Matrix (to find acceleration), and updates the displacement vector $U^{n+1}$.
+| Library | Version | Role |
+|---------|---------|------|
+| deal.II | ≥ 9.4 | FEM framework |
+| MPI | any | inter-process communication |
+| Trilinos | ≥ 13.0 | distributed matrices/vectors |
+| p4est | ≥ 2.3 | distributed mesh |
 
-#### 4. Output (`output_results`)
-- Uses the `DataOut` class to attach the DoF handler and the solution vector.
-- Writes `.vtk` files (e.g., `solution-001.vtk`) containing the wave field state at specific time steps for post-processing.
+# 8. Compilation and Running
 
-### Main Entry Point (`main.cc`)
-A minimal file that initializes the `WaveEquation<2>` object and calls the `run()` method within a try-catch block to handle deal.II exceptions.
+```bash
+mkdir build && cd build
+cmake -DDEAL_II_DIR=/path/to/dealii ..
+make -j$(nproc)
 
-### Build System
+# MMS convergence study
+mpirun -n 1 ./wave_equation --mode mms
 
-Dependencies and build are handled through a Docker container made available from the course instructors at https://github.com/HPC-Courses/AMSC-Labs/blob/main/Labs/2025-26/00-environment_setup/README.md#2-linux-users.
+# Physical scenarios
+mpirun -n 4 ./wave_equation --mode pebble --ref 6
 
-Github will be used to keep track of the project files while the container will be handled locally be each partecipant of the project.
+# Scaling benchmarks
+mpirun -n 1 ./wave_equation --mode strong --ref 8
+mpirun -n 4 ./wave_equation --mode strong --ref 8
+```
+
+Output: `.pvtu` + `.pvd` files for ParaView, `energy_log.csv` for energy diagnostics.
+
+# 9. Authors
+
+Barrella Teresa, Chiari Stefano, Colangelo Luca, Sanjevic Milica  
+Politecnico di Milano — June 2026
