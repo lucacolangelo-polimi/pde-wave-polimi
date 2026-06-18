@@ -60,9 +60,9 @@ applying Green's first identity to eliminate the divergence term:
 $$
 \int_\Omega \frac{\partial^2 u}{\partial t^2} v \, d\mathbf{x}
 + \int_\Omega c^2(\mathbf{x}) \nabla u \cdot \nabla v \, d\mathbf{x}
-= \int_\Omega f v \, d\mathbf{x} \quad \forall v \in H_0^1(\Omega)
+= \int_\Omega f v \, d\mathbf{x},
+\qquad \forall v \in H_0^1(\Omega)
 $$
-
 The boundary integral vanishes because $v = 0$ on $\partial\Omega$.
 
 # 3. Space Discretization — Galerkin FEM
