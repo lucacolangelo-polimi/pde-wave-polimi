@@ -666,8 +666,13 @@ void WaveEquation<dim>::solve_time_step_newmark()
     cg_solver.solve(system_matrix_newmark, a_new, rhs_newmark, newmark_preconditioner);
     constraints.distribute(a_new);
 
-    if (step_number % output_every_n_steps == 0)
-        pcout << "    Newmark CG: " << solver_control.last_step() << " iterazioni\n";
+    static unsigned int dbg_step = 0;
+    dbg_step++;
+    // Stampa ogni 100 step per non floodare il terminale e non rallentare il benchmark con l'I/O
+    if (dbg_step % 100 == 0) {
+        pcout << "    [DIAG] Newmark CG (step " << dbg_step << "): " 
+              << solver_control.last_step() << " iterazioni\n";
+    }
 
     // 5. Correttori finali
     for (const auto idx : locally_owned_dofs)
@@ -1784,11 +1789,11 @@ void WaveEquation<dim>::build_newmark_system_matrix()
     //pcout << "  Matrix Newmark and AMG preconditioner ready.\n";
     
 
-    // ILU preconditioner (perfetto per matrici fortemente dominanti diagonali)
-    TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
-    newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
-    newmark_matrix_is_current = true;
-    pcout << "  Matrix Newmark and ILU preconditioner ready.\n";
+    // // ILU preconditioner (perfetto per matrici fortemente dominanti diagonali)
+    // TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
+    // newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
+    // newmark_matrix_is_current = true;
+    // pcout << "  Matrix Newmark and ILU preconditioner ready.\n";
 }
 */
 
@@ -1812,12 +1817,20 @@ void WaveEquation<dim>::build_newmark_system_matrix()
 
     system_matrix_newmark.compress(VectorOperation::add);
 
-    // Precondizionatore ILU
-    TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
-    newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
+    // // Precondizionatore ILU
+    // TrilinosWrappers::PreconditionILU::AdditionalData ilu_data;
+    // newmark_preconditioner.initialize(system_matrix_newmark, ilu_data);
+
+    TrilinosWrappers::PreconditionAMG::AdditionalData amg_data;
+    amg_data.elliptic              = true;
+    amg_data.higher_order_elements = (fe_degree > 1);
+    amg_data.smoother_sweeps       = 2;
+    amg_data.aggregation_threshold = 1e-4;
+
+    newmark_preconditioner.initialize(system_matrix_newmark, amg_data);
 
     newmark_matrix_is_current = true;
-    pcout << "  Matrix Newmark and ILU preconditioner ready.\n";
+    pcout << "  Matrix Newmark and AMG preconditioner ready.\n";
 }
 
 

@@ -322,8 +322,8 @@ private:
 
     //NEWMR MATRIX AND PRECONDITIONER 
     bool newmark_matrix_is_current = false;
-    //TrilinosWrappers::PreconditionAMG newmark_preconditioner;                 //amr preconditioner, good for elliptic problems but non-optimal per Newmark (non-elliptic)
-    TrilinosWrappers::PreconditionILU newmark_preconditioner;                   // ILU preconditioner, good for strongly diagonally dominant matrices like those from Newmark
+    TrilinosWrappers::PreconditionAMG newmark_preconditioner;                 //amr preconditioner, good for elliptic problems but non-optimal per Newmark (non-elliptic)
+    // TrilinosWrappers::PreconditionILU newmark_preconditioner;                   // ILU preconditioner, good for strongly diagonally dominant matrices like those from Newmark
 
     // Constructs A = M + β·dt²·K and initializes the AMG preconditioner.
     // Called after assemble_matrices() and after refine_mesh() (mesh changed).

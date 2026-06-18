@@ -1,0 +1,15 @@
+======================================
+  Energy Conservation Report
+  Time scheme: Leapfrog
+  dt=0.0005  T=1  fe_degree=Q1
+  MPI processes: 4
+======================================
+  E0 (initial total energy): 837.621
+
+  See energy_log.csv for full time series.
+
+  Expected drift:
+    Leapfrog      : O(dt^2) oscillation, zero mean drift
+    Newmark b=0.25: near-zero drift (symplectic-like)
+    Newmark b>0.25: monotone decay (numerical dissipation)
+======================================
